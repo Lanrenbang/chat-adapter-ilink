@@ -1,0 +1,45 @@
+name: '🚀 Release Manager'
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    types:
+      - opened
+      - reopened
+      - synchronize
+
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: 'Publish the draft as an official release?'
+        type: boolean
+        required: true
+        default: false
+      prerelease-identifier:
+        description: |
+          A string indicating an identifier (alpha, beta, rc, etc), to increment the prerelease version.
+        required: false
+        default: ''
+
+  repository_dispatch:
+    types: [upstream-updated]
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    uses: Lanrenbang/.github/.github/workflows/reusable-release-manager.yml@main
+    permissions:
+      contents: write
+      pull-requests: write
+    with:
+      has_docker: false
+      publish: ${{ github.event_name == 'workflow_dispatch' && inputs.publish || false }}
+      prerelease_identifier: ${{ github.event_name == 'workflow_dispatch' && inputs.prerelease-identifier || '' }}
+      event_name: ${{ github.event_name }}
+      triggered_by: ${{ github.event.client_payload.triggered_by || '' }}
+    secrets:
+      bot_pat: ${{ secrets.BOT_PAT }}
