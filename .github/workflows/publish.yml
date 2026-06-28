@@ -46,7 +46,7 @@ jobs:
       # 注意：bun publish v1.3.14 存在无法正确读取 .npmrc auth token 的 bug，
       # 因此这里使用 npm publish 而非 bun publish
       - name: Publish
-        if: !inputs.dry_run
+        if: inputs.dry_run != true
         run: npm publish --access public --provenance
 
       - name: Summary
