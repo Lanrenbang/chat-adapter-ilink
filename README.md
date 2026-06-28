@@ -39,45 +39,80 @@ The adapter auto-detects `ILINK_BOT_TOKEN`, `ILINK_BASE_URL`, and `ILINK_CDN_BAS
 
 ## Authentication
 
-iLink is an open protocol from WeChat individual-account bot system, originally open-sourced through the [OpenClaw](https://github.com/Tencent/openclaw-weixin) plugin. It uses QR-code authentication — there is no API key or token to paste. You **must provide a QR-code display mechanism** in your application (CLI, web UI, or any other frontend). The adapter's `login()` function accepts an `onQRCode` callback for this purpose:
+iLink is an open protocol from WeChat individual-account bot system, originally open-sourced through the [OpenClaw](https://github.com/Tencent/openclaw-weixin) plugin. It uses QR-code authentication — there is no API key or token to paste. You **must provide a QR-code display mechanism** in your application (CLI, web UI, or any other frontend).
+
+The `login()` function supports two modes:
+
+### Mode 1: Internal polling (with `onStatusChange`)
+
+When you provide an `onStatusChange` callback, the adapter handles the entire login loop internally — generating the QR code, long-polling for status changes, QR refresh on expiry, and IDC redirect handling. The callback fires on every status transition:
 
 ```typescript
 import { login } from "@lanrenbang/chat-adapter-ilink";
 
 const result = await login(state, {
-  onQRCode: (qrCodeUrl: string) => {
-    // Render the QR code image in your UI:
-    // - CLI: Print the URL for manual display
-    // - Web: Render <img src={qrCodeUrl} />
-    // - Agent: Return the URL in a message
-    console.log("Scan this QR code in WeChat:", qrCodeUrl);
+  onStatusChange: (status, qrcodeUrl, sessionKey) => {
+    switch (status) {
+      case "wait":
+        console.log("Scan this QR code in WeChat:", qrcodeUrl);
+        break;
+      case "scaned":
+        console.log("QR scanned by phone, waiting for confirmation...");
+        break;
+      case "confirmed":
+        console.log("Login confirmed!");
+        break;
+      case "need_verifycode":
+        console.log("Verify code required — capture user input and retry with verifyCode");
+        break;
+    }
   },
 });
 ```
 
-### Pairing code (verify code) flow
+The Promise resolves with the final `LoginResult` once the login completes or reaches a terminal state.
 
-When WeChat detects risk or unusual activity, it may require a **pairing code** before completing login. The flow is:
+### Mode 2: Single-shot (no callback)
 
-1. User scans QR on their phone
-2. Server returns `need_verifycode` — a numeric code appears on the user's phone screen
-3. `login()` returns `{ status: "need_verifycode", verifyCodePrompt }` — **your frontend must capture user input**
-4. User reads the code from their phone and types it into your UI
-5. Call `login()` again with the code:
+Without `onStatusChange`, `login()` returns immediately with a QR URL and session key. The caller manages polling externally:
 
 ```typescript
-const result = await login(state, { verifyCode: userInput });
+// Step 1: Initiate login — get QR URL and session key
+const first = await login(state);
+// { qrcodeUrl: "...", sessionKey: "uuid-xxx", status: "wait" }
 
-if (result.status === "success") {
-  console.log("Connected! Account:", result.accountId);
-} else if (result.status === "need_verifycode") {
-  // Wrong code — show prompt again
-  const retry = await promptUser(result.verifyCodePrompt!);
-  // retry with new code
+// Step 2: Poll periodically (from browser, CLI loop, etc.)
+const second = await login(state, { sessionKey: first.sessionKey });
+// { qrcodeUrl: "...", sessionKey: "uuid-xxx", status: "scaned" }
+
+// Continue until terminal status
+```
+
+This mode is ideal for HTTP API scenarios where the backend issues a session and the frontend handles the polling loop.
+
+### Pairing code (verify code) flow
+
+When WeChat detects risk or unusual activity, it may require a **pairing code** before completing login. In internal polling mode, the function returns with `{ status: "need_verifycode", verifyCodePrompt }`. Capture the user's input and call `login()` again with `verifyCode`:
+
+```typescript
+const result = await login(state, { onStatusChange });
+
+if (result.status === "need_verifycode") {
+  const userInput = await promptUser(result.verifyCodePrompt!);
+  const retry = await login(state, {
+    sessionKey: result.sessionKey,
+    verifyCode: userInput,
+    onStatusChange,
+  });
+  // retry.status === "success" | "need_verifycode" | ...
 }
 ```
 
 > The QR session is **preserved** across `need_verifycode` returns. Do not generate a new QR code — the user has already scanned it. The verify code is tied to the existing scan.
+
+### Session key persistence
+
+Each login session is stored in the `StateAdapter` with a 5-minute TTL. Subsequent calls with the same `sessionKey` will resume the existing session. This works across both modes.
 
 ### Multi-account management
 
@@ -89,11 +124,8 @@ import { login } from "@lanrenbang/chat-adapter-ilink";
 
 const adapter = createILinkAdapter();
 
-// After `bot.initialize()`:
-// 1. Login (from CLI/web/agent)
-const result = await login(state, { onQRCode: console.log });
+const result = await login(state, { onStatusChange });
 
-// 2. Register the account with the adapter
 if (result.connected && result.botToken && result.accountId) {
   await adapter.addAccount(result.accountId, {
     token: result.botToken,
@@ -105,6 +137,46 @@ if (result.connected && result.botToken && result.accountId) {
 ```
 
 Accounts persist in the StateAdapter and are restored automatically on next `initialize()`.
+
+### Agent integration (Sub-Agent pattern)
+
+When using this adapter inside a Cloudflare Agent (Agents SDK), wrap each login session in a Sub-Agent for storage isolation and direct client routing:
+
+```typescript
+import { Agent } from "agents";
+import { login } from "@lanrenbang/chat-adapter-ilink";
+
+// Parent agent — orchestrates login sessions
+class BotAgent extends Agent {
+  async startLogin(accountId: string) {
+    const session = await this.subAgent(LoginSession, `login:${accountId}`);
+    return session.getQRUrl();
+  }
+}
+
+// Login session sub-agent — isolated SQLite, no DO binding needed
+class LoginSession extends Agent {
+  private qrcodeUrl = "";
+
+  async onStart() {
+    const result = await login(this.state, {
+      onStatusChange: (status, url) => {
+        if (url) this.qrcodeUrl = url;
+        // Broadcast status updates via Agent state
+        this.setState({ loginStatus: status, qrcodeUrl: url });
+      },
+    });
+    // Store result in isolated storage
+    this.setState({ loginResult: result });
+  }
+
+  getQRUrl(): string {
+    return this.qrcodeUrl;
+  }
+}
+```
+
+No extra Durable Object bindings required — only the parent needs a DO binding. Child classes just need to be exported from the Worker entry point.
 
 ## Configuration
 
