@@ -37,6 +37,14 @@
     "typescript": "^5.7.0",
     "vitest": "^4.0.0"
   },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Lanrenbang/chat-adapter-ilink.git"
+  },
+  "homepage": "https://github.com/Lanrenbang/chat-adapter-ilink",
+  "bugs": {
+    "url": "https://github.com/Lanrenbang/chat-adapter-ilink/issues"
+  },
   "publishConfig": {
     "access": "public"
   },
