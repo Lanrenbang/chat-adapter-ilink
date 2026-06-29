@@ -25,6 +25,7 @@ import { configureApi } from "./api/api.js";
 import { DEFAULT_BASE_URL, CDN_BASE_URL } from "./auth/accounts.js";
 import type { AccountCredentials } from "./auth/accounts.js";
 import { listAccounts, loadAccount, clearAccount } from "./auth/accounts.js";
+import { loginImpl, type LoginOptions, type LoginResult, type LoginResultInternal } from "./auth/login.js";
 import { ILinkFormatConverter } from "./format-converter.js";
 import { MessageItemType, MessageType } from "./api/types.js";
 import type { WeixinMessage } from "./api/types.js";
@@ -635,8 +636,8 @@ export class ILinkAdapter implements Adapter {
     return creds?.token;
   }
 
-  /** Login (add a new account) and start its poll loop. */
-  async addAccount(accountId: string, credentials: AccountCredentials): Promise<void> {
+  /** Login (add a new account) and start its poll loop. @internal */
+  private async addAccount(accountId: string, credentials: AccountCredentials): Promise<void> {
     const { registerAccount } = await import("./auth/accounts.js");
     await registerAccount(this.state!, accountId, credentials);
     this.startPollLoop(accountId, credentials);
@@ -647,6 +648,40 @@ export class ILinkAdapter implements Adapter {
     await clearAccount(this.state!, accountId);
     this.pollLoops.get(accountId)?.abortController.abort();
     this.pollLoops.delete(accountId);
+  }
+
+  /**
+   * QR-code login.
+   *
+   * Two modes:
+   * 1. **Internal polling** (with `onStatusChange` callback) — handles the full loop
+   *    internally; the callback fires on each status transition. Return value is
+   *    informational (status/qrcodeUrl only).
+   * 2. **Single-shot** (no callback) — returns immediately with QR URL + sessionKey;
+   *    the caller polls by calling `adapter.login()` again with `sessionKey`.
+   *
+   * On `status === "confirmed"`, the account is automatically registered for
+   * message polling (no manual `addAccount` needed).
+   */
+  async login(options?: LoginOptions): Promise<LoginResult> {
+    this.assertInitialized();
+    const internal = await loginImpl(this.state!, { ...options });
+
+    if (internal.status === "confirmed" && internal.botToken && internal.accountId) {
+      await this.addAccount(internal.accountId, {
+        token: internal.botToken,
+        baseUrl: internal.baseUrl ?? "https://ilinkai.weixin.qq.com",
+        userId: internal.userId ?? "",
+      });
+    }
+
+    // Return public result only — no internal fields exposed
+    return {
+      status: internal.status,
+      qrcodeUrl: internal.qrcodeUrl,
+      sessionKey: internal.sessionKey,
+      message: internal.message,
+    };
   }
 
   private async resolvePrimaryAccountId(): Promise<string> {

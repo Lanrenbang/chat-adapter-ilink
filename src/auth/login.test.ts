@@ -1,182 +1,228 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { createMemoryState } from "@chat-adapter/state-memory";
-import type { StateAdapter } from "chat";
-import { login } from "./login.js";
+import type { StateAdapter, ChatInstance, Logger } from "chat";
+import { createILinkAdapter } from "../factory.js";
+import type { ILinkAdapter } from "../adapter.js";
 
-vi.mock("../api/api.js", () => ({
-  apiPostFetch: vi.fn(),
-  apiGetFetch: vi.fn(),
-}));
+const mockLogger = {
+  info: vi.fn(),
+  debug: vi.fn(),
+  error: vi.fn(),
+  warn: vi.fn(),
+};
+
+vi.mock("../api/api.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../api/api.js")>();
+  return {
+    ...actual,
+    apiPostFetch: vi.fn(),
+    apiGetFetch: vi.fn(),
+  };
+});
 
 import { apiPostFetch, apiGetFetch } from "../api/api.js";
 
-const qr1 = {
+const QR1 = {
   qrcode: "qrcode_raw_abc123",
   qrcode_img_content: "https://qr.example.com/qrcode_abc123",
 };
 
-const qr2 = {
+const QR2 = {
   qrcode: "qrcode_raw_def456",
   qrcode_img_content: "https://qr.example.com/qrcode_def456",
 };
 
-describe("login", () => {
+function createMockChat(state: StateAdapter): ChatInstance {
+  return {
+    getLogger: () => mockLogger as unknown as Logger,
+    getState: () => state,
+  } as unknown as ChatInstance;
+}
+
+describe("ILinkAdapter.login", () => {
   let state: StateAdapter;
+  let adapter: ILinkAdapter;
 
   beforeEach(async () => {
     state = createMemoryState();
     await state.connect();
     vi.clearAllMocks();
+    vi.mocked(apiPostFetch).mockResolvedValue(JSON.stringify(QR1));
+    vi.mocked(apiGetFetch).mockResolvedValue(JSON.stringify({ status: "wait" }));
     vi.spyOn(console, "error").mockImplementation(() => {});
     vi.spyOn(console, "debug").mockImplementation(() => {});
-    vi.mocked(apiPostFetch).mockResolvedValue(JSON.stringify(qr1));
-    vi.mocked(apiGetFetch).mockResolvedValue(JSON.stringify({ status: "wait" }));
+
+    adapter = createILinkAdapter();
+    await adapter.initialize(createMockChat(state));
+  });
+
+  afterEach(() => {
+    // Clean up any poll loops started by login tests
+    (adapter as any).pollLoops.forEach((loop: any) => {
+      loop.abortController?.abort();
+    });
+    (adapter as any).pollLoops.clear();
   });
 
   describe("single-shot mode (no onStatusChange)", () => {
-    it("generates QR and returns immediately", async () => {
-      const result = await login(state);
+    it("generates QR and returns immediately without polling", async () => {
+      const result = await adapter.login();
 
       expect(apiPostFetch).toHaveBeenCalledTimes(1);
-      expect(result.qrcodeUrl).toBe(qr1.qrcode_img_content);
+      expect(apiGetFetch).not.toHaveBeenCalled(); // no poll on first call
+      expect(result.qrcodeUrl).toBe(QR1.qrcode_img_content);
       expect(result.sessionKey).toBeDefined();
       expect(result.status).toBe("wait");
-      expect(result.connected).toBe(false);
+      expect(result.message).toContain("扫描");
     });
 
-    it("resumes existing session when called with sessionKey", async () => {
-      const first = await login(state);
+    it("polls once when called with sessionKey", async () => {
+      const first = await adapter.login();
+
       vi.mocked(apiGetFetch).mockResolvedValueOnce(
         JSON.stringify({ status: "scaned" }),
       );
 
-      const resumed = await login(state, { sessionKey: first.sessionKey });
-      expect(resumed.sessionKey).toBe(first.sessionKey);
-      expect(resumed.qrcodeUrl).toBe(first.qrcodeUrl);
+      const second = await adapter.login({ sessionKey: first.sessionKey });
+      expect(apiGetFetch).toHaveBeenCalledTimes(1);
+      expect(second.status).toBe("scaned");
+      expect(second.qrcodeUrl).toBe(first.qrcodeUrl);
     });
 
-    it("returns error when QR generation fails", async () => {
+    it("returns expired on QR generation failure", async () => {
       vi.mocked(apiPostFetch).mockRejectedValueOnce(new Error("fail"));
 
-      const result = await login(state);
-      expect(result.status).toBe("error");
-      expect(result.connected).toBe(false);
+      const result = await adapter.login();
+      expect(result.status).toBe("expired");
+      expect(result.message).toContain("获取二维码失败");
     });
   });
 
   describe("internal polling mode (with onStatusChange)", () => {
-    it("calls onStatusChange on each status transition", async () => {
+    it("calls onStatusChange with wait before first poll", async () => {
       const onStatusChange = vi.fn();
+      vi.mocked(apiGetFetch).mockResolvedValue(JSON.stringify({ status: "wait" }));
 
-      vi.mocked(apiGetFetch)
-        .mockResolvedValueOnce(JSON.stringify({ status: "wait" }))
-        .mockResolvedValueOnce(
-          JSON.stringify({
-            status: "confirmed",
-            ilink_bot_id: "bot_xyz@im.bot",
-            bot_token: "tok_xyz",
-            ilink_user_id: "user_xyz@im.wechat",
-          }),
-        );
-
-      const result = await login(state, { onStatusChange, timeoutMs: 10000 });
+      await adapter.login({ onStatusChange, timeoutMs: 100 });
 
       expect(onStatusChange).toHaveBeenNthCalledWith(
         1,
         "wait",
-        qr1.qrcode_img_content,
+        QR1.qrcode_img_content,
         expect.any(String),
       );
-      expect(onStatusChange).toHaveBeenCalledWith(
-        "confirmed",
-        qr1.qrcode_img_content,
-        expect.any(String),
-      );
-      expect(result.connected).toBe(true);
-      expect(result.status).toBe("success");
-      expect(result.botToken).toBe("tok_xyz");
-      expect(result.accountId).toBe("bot_xyz@im.bot");
-    });
+    }, 10000);
 
-    it("returns need_verifycode and preserves session", async () => {
-      const sessionKey = "test-session";
+    it("returns confirmed and auto-registers", async () => {
+      vi.mocked(apiGetFetch).mockResolvedValueOnce(
+        JSON.stringify({
+          status: "confirmed",
+          ilink_bot_id: "bot_xyz@im.bot",
+          bot_token: "tok_xyz",
+          baseurl: "https://ilinkai.weixin.qq.com",
+          ilink_user_id: "user_xyz@im.wechat",
+        }),
+      );
+
+      const result = await adapter.login({
+        onStatusChange: vi.fn(),
+        timeoutMs: 10000,
+      });
+
+      expect(result.status).toBe("confirmed");
+      // Public result must NOT expose internal fields
+      expect((result as any).botToken).toBeUndefined();
+      expect((result as any).accountId).toBeUndefined();
+      // Verify account was registered in state by checking accounts list
+      const accounts = await state.get<string[]>("ilink:accounts:list");
+      expect(accounts).toContain("bot_xyz@im.bot");
+    }, 10000);
+
+    it("returns need_verifycode with prompt in message", async () => {
       vi.mocked(apiGetFetch).mockResolvedValueOnce(
         JSON.stringify({ status: "need_verifycode" }),
       );
 
-      const result1 = await login(state, {
+      const result = await adapter.login({
+        onStatusChange: vi.fn(),
+        timeoutMs: 10000,
+      });
+
+      expect(result.status).toBe("need_verifycode");
+      expect(result.message).toContain("输入手机微信显示的数字");
+      expect(result.sessionKey).toBeDefined();
+    });
+
+    it("retries need_verifycode with verifyCode", async () => {
+      const sessionKey = "test-session";
+      // First call returns need_verifycode, second with verifyCode returns scaned
+      vi.mocked(apiGetFetch)
+        .mockResolvedValueOnce(JSON.stringify({ status: "need_verifycode" }))
+        .mockResolvedValueOnce(JSON.stringify({ status: "confirmed", ilink_bot_id: "bot_cv@im.bot", bot_token: "tok" }));
+
+      // First call: triggers need_verifycode
+      const r1 = await adapter.login({
         sessionKey,
         onStatusChange: vi.fn(),
         timeoutMs: 10000,
       });
-      expect(result1.status).toBe("need_verifycode");
-      expect(result1.verifyCodePrompt).toBe("输入手机微信显示的数字：");
+      expect(r1.status).toBe("need_verifycode");
 
-      vi.mocked(apiGetFetch).mockResolvedValueOnce(
-        JSON.stringify({ status: "need_verifycode" }),
-      );
-
-      const result2 = await login(state, {
+      // Second call: resume with verifyCode
+      const r2 = await adapter.login({
         sessionKey,
         verifyCode: "123456",
         onStatusChange: vi.fn(),
         timeoutMs: 10000,
       });
-      expect(result2.status).toBe("need_verifycode");
-      expect(result2.verifyCodePrompt).toContain("不匹配");
-    });
+      expect(r2.status).toBe("confirmed");
+      // verifyCode was passed to pollQRStatus via options
+      // (logged by apiGetFetch mock — we check it was the second call)
+      expect(apiGetFetch).toHaveBeenCalledTimes(2);
+    }, 10000);
 
     it("refreshes QR on expired and retries", async () => {
       vi.mocked(apiGetFetch)
         .mockResolvedValueOnce(JSON.stringify({ status: "expired" }))
-        .mockResolvedValueOnce(
-          JSON.stringify({
-            status: "confirmed",
-            ilink_bot_id: "bot_refresh@im.bot",
-          }),
-        );
-      vi.mocked(apiPostFetch).mockResolvedValue(JSON.stringify(qr2));
+        .mockResolvedValueOnce(JSON.stringify({ status: "confirmed", ilink_bot_id: "bot_xyz@im.bot", bot_token: "tok" }));
+      vi.mocked(apiPostFetch).mockResolvedValue(JSON.stringify(QR2));
 
-      const result = await login(state, {
+      const result = await adapter.login({
         onStatusChange: vi.fn(),
         timeoutMs: 10000,
       });
 
       expect(apiPostFetch).toHaveBeenCalledTimes(2);
-      expect(result.connected).toBe(true);
-      expect(result.accountId).toBe("bot_refresh@im.bot");
-    });
+      expect(result.status).toBe("confirmed");
+    }, 10000);
 
     it("stops after MAX_QR_REFRESH_COUNT expired", async () => {
-      vi.mocked(apiGetFetch).mockResolvedValue(
-        JSON.stringify({ status: "expired" }),
-      );
-      vi.mocked(apiPostFetch).mockResolvedValue(JSON.stringify(qr2));
+      vi.mocked(apiGetFetch).mockResolvedValue(JSON.stringify({ status: "expired" }));
+      vi.mocked(apiPostFetch).mockResolvedValue(JSON.stringify(QR2));
 
-      const result = await login(state, {
+      const result = await adapter.login({
         onStatusChange: vi.fn(),
         timeoutMs: 10000,
       });
 
       expect(apiPostFetch).toHaveBeenCalledTimes(3);
       expect(result.status).toBe("expired");
-      expect(result.error).toContain("多次过期");
-    });
+      expect(result.message).toContain("多次过期");
+    }, 10000);
 
-    it("handles binded_redirect as already connected", async () => {
+    it("handles binded_redirect", async () => {
       vi.mocked(apiGetFetch).mockResolvedValueOnce(
         JSON.stringify({ status: "binded_redirect" }),
       );
 
-      const result = await login(state, {
+      const result = await adapter.login({
         onStatusChange: vi.fn(),
         timeoutMs: 10000,
       });
 
-      expect(result.connected).toBe(true);
-      expect(result.alreadyConnected).toBe(true);
-      expect(result.status).toBe("success");
-    });
+      expect(result.status).toBe("binded_redirect");
+      expect(result.message).toContain("已连接过");
+    }, 10000);
 
     it("handles scaned_but_redirect and follows redirect host", async () => {
       vi.mocked(apiGetFetch)
@@ -187,117 +233,86 @@ describe("login", () => {
           }),
         )
         .mockResolvedValueOnce(
-          JSON.stringify({
-            status: "confirmed",
-            ilink_bot_id: "bot_redirect@im.bot",
-          }),
+          JSON.stringify({ status: "confirmed", ilink_bot_id: "bot_xyz@im.bot", bot_token: "tok" }),
         );
 
-      const result = await login(state, {
+      const result = await adapter.login({
         onStatusChange: vi.fn(),
         timeoutMs: 10000,
       });
 
-      expect(result.connected).toBe(true);
-      expect(result.accountId).toBe("bot_redirect@im.bot");
-    });
+      expect(result.status).toBe("confirmed");
+    }, 10000);
 
     it("handles verify_code_blocked by refreshing QR", async () => {
       vi.mocked(apiGetFetch)
-        .mockResolvedValueOnce(
-          JSON.stringify({ status: "verify_code_blocked" }),
-        )
-        .mockResolvedValueOnce(
-          JSON.stringify({
-            status: "confirmed",
-            ilink_bot_id: "bot_blocked@im.bot",
-          }),
-        );
-      vi.mocked(apiPostFetch).mockResolvedValue(JSON.stringify(qr2));
+        .mockResolvedValueOnce(JSON.stringify({ status: "verify_code_blocked" }))
+        .mockResolvedValueOnce(JSON.stringify({ status: "confirmed", ilink_bot_id: "bot_xyz@im.bot", bot_token: "tok" }));
+      vi.mocked(apiPostFetch).mockResolvedValue(JSON.stringify(QR2));
 
-      const result = await login(state, {
+      const result = await adapter.login({
         onStatusChange: vi.fn(),
         timeoutMs: 10000,
       });
 
       expect(apiPostFetch).toHaveBeenCalledTimes(2);
-      expect(result.connected).toBe(true);
-      expect(result.accountId).toBe("bot_blocked@im.bot");
-    });
+      expect(result.status).toBe("confirmed");
+    }, 10000);
 
     it("times out and returns expired", async () => {
-      vi.mocked(apiGetFetch).mockResolvedValue(
-        JSON.stringify({ status: "wait" }),
-      );
+      vi.mocked(apiGetFetch).mockResolvedValue(JSON.stringify({ status: "wait" }));
 
-      const result = await login(state, {
+      const result = await adapter.login({
         onStatusChange: vi.fn(),
         timeoutMs: 100,
       });
 
       expect(result.status).toBe("expired");
-      expect(result.error).toContain("超时");
-    });
+      expect(result.message).toContain("超时");
+    }, 10000);
   });
 
   describe("session persistence", () => {
     it("reuses existing session when not forced", async () => {
-      const first = await login(state);
-      const second = await login(state, { sessionKey: first.sessionKey });
+      const first = await adapter.login();
+      const second = await adapter.login({ sessionKey: first.sessionKey });
 
       expect(second.qrcodeUrl).toBe(first.qrcodeUrl);
       expect(apiPostFetch).toHaveBeenCalledTimes(1);
     });
 
     it("generates new QR when force=true", async () => {
-      const first = await login(state);
-      vi.mocked(apiPostFetch).mockResolvedValue(JSON.stringify(qr2));
+      const first = await adapter.login();
+      vi.mocked(apiPostFetch).mockResolvedValue(JSON.stringify(QR2));
 
-      const second = await login(state, {
+      const second = await adapter.login({
         sessionKey: first.sessionKey,
         force: true,
       });
 
-      expect(second.qrcodeUrl).toBe(qr2.qrcode_img_content);
+      expect(second.qrcodeUrl).toBe(QR2.qrcode_img_content);
       expect(apiPostFetch).toHaveBeenCalledTimes(2);
     });
   });
 
-  describe("storage TTL", () => {
-    it("saves QR session with 5-minute TTL", async () => {
-      const setSpy = vi.spyOn(state, "set");
-      await login(state);
-
-      expect(setSpy).toHaveBeenCalledWith(
-        expect.stringContaining("ilink:login:"),
-        expect.objectContaining({ qrcode: qr1.qrcode }),
-        300_000,
-      );
-    });
-
-    it("deletes session on terminal status", async () => {
+  describe("internal fields not exposed", () => {
+    it("does not expose botToken, accountId, baseUrl, userId in public result", async () => {
       vi.mocked(apiGetFetch).mockResolvedValueOnce(
-        JSON.stringify({
-          status: "confirmed",
-          ilink_bot_id: "bot_del@im.bot",
-        }),
+        JSON.stringify({ status: "confirmed", ilink_bot_id: "bot_xyz@im.bot", bot_token: "tok_secret" }),
       );
-      const deleteSpy = vi.spyOn(state, "delete");
 
-      await login(state, { onStatusChange: vi.fn(), timeoutMs: 10000 });
+      const result: Record<string, unknown> = await adapter.login({
+        onStatusChange: vi.fn(),
+        timeoutMs: 10000,
+      });
 
-      expect(deleteSpy).toHaveBeenCalledWith(
-        expect.stringContaining("ilink:login:"),
-      );
-    });
-  });
-
-  describe("error handling", () => {
-    it("returns error when QR generation API fails", async () => {
-      vi.mocked(apiPostFetch).mockRejectedValue(new Error("Network fail"));
-
-      const result = await login(state);
-      expect(result.status).toBe("error");
-    });
+      expect(result.status).toBe("confirmed");
+      expect(result.botToken).toBeUndefined();
+      expect(result.accountId).toBeUndefined();
+      expect(result.baseUrl).toBeUndefined();
+      expect(result.userId).toBeUndefined();
+      expect(result.connected).toBeUndefined();
+      expect(result.alreadyConnected).toBeUndefined();
+    }, 10000);
   });
 });

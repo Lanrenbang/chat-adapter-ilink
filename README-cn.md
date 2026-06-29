@@ -39,72 +39,160 @@ bot.onNewMention(async (thread, message) => {
 
 ## 认证
 
-iLink 是微信个人版机器人体系中的开放协议，最初通过 [OpenClaw](https://github.com/Tencent/openclaw-weixin) 插件开源实现。它使用二维码认证——没有 API key 或 token 可以直接粘贴。你**必须在应用中提供二维码展示机制**（CLI、网页 UI 或任意前端）。适配器的 `login()` 函数通过 `onQRCode` 回调处理这一流程：
+iLink 是微信个人版机器人体系中的开放协议，最初通过 [OpenClaw](https://github.com/Tencent/openclaw-weixin) 插件开源实现。它使用二维码认证——没有 API key 或 token 可以直接粘贴。你**必须在应用中提供二维码展示机制**（CLI、网页 UI 或任意前端）。
+
+### LoginOptions
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `sessionKey` | `string` | 自动生成 | 恢复已有登录会话 |
+| `force` | `boolean` | `false` | 跳过缓存，强制生成新二维码 |
+| `verifyCode` | `string` | — | 配对/验证码（用于 `need_verifycode` 流程） |
+| `botType` | `string` | `"3"` | iLink 机器人类型参数 |
+| `timeoutMs` | `number` | `480000` (8 分钟) | 登录超时（最小 1000ms），仅内部轮询模式有效 |
+| `onStatusChange` | `(status, qrcodeUrl?, sessionKey) => void` | — | 内部轮询回调。提供时自动轮询，省略时立即返回 |
+
+### LoginResult
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `status` | `QRSessionStatus` | 原始上游 QR 状态（见下方表格） |
+| `qrcodeUrl` | `string \| undefined` | 二维码图片 URL，供展示 |
+| `sessionKey` | `string \| undefined` | 不透明令牌，用于恢复会话 |
+| `message` | `string \| undefined` | 人类可读的提示或错误描述 |
+
+### QR 状态值
+
+| 状态 | 含义 | 下一步 |
+|------|------|--------|
+| `wait` | 等待用户扫码 | 显示二维码，等待 |
+| `scaned` | 手机已扫码，等待确认 | 等待 |
+| `confirmed` | 用户在手机上确认了登录 | ✅ **登录成功** — 账号自动注册 |
+| `binded_redirect` | 已绑定过（存在有效 token） | ✅ 视为成功——已连接 |
+| `expired` | 二维码超时 / 登录超时 | 重新生成二维码重试 |
+| `need_verifycode` | 需要配对/验证码 | 获取用户输入后调用 `login()` 附带 `verifyCode` |
+| `verify_code_blocked` | 验证码输入错误次数过多 | 稍后重试 |
+| `scaned_but_redirect` | 已扫码但需 IDC 重定向 | 临时状态——适配器自动处理 |
+
+适配器支持两种登录模式：
+
+### 提供回调参数 - 内部自动轮询
+
+传入 `onStatusChange` 回调后，适配器自动处理完整的登录循环——生成二维码、长轮询、过期/重定向处理，成功时自动注册账号并开始消息轮询。回调在每次状态变化时触发。返回值仅为参考（status/message）。
 
 ```typescript
-import { login } from "@lanrenbang/chat-adapter-ilink";
+import type { ILinkAdapter } from "@lanrenbang/chat-adapter-ilink";
 
-const result = await login(state, {
-  onQRCode: (qrCodeUrl: string) => {
-    // 在 UI 中渲染二维码图片：
-    // - CLI：打印 URL 供手动展示
-    // - Web：渲染 <img src={qrCodeUrl} />
-    // - Agent：在消息中返回 URL
-    console.log("Scan this QR code in WeChat:", qrCodeUrl);
+const adapter = bot.getAdapter("ilink") as ILinkAdapter;
+
+const result = await adapter.login({
+  onStatusChange: (status, qrcodeUrl, sessionKey) => {
+    switch (status) {
+      case "wait":
+        console.log("请在微信中扫描二维码：", qrcodeUrl);
+        break;
+      case "scaned":
+        console.log("二维码已扫描，等待确认...");
+        break;
+      case "confirmed":
+        console.log("登录已确认！");
+        break;
+      case "need_verifycode":
+        // 见下方"验证码流程"
+        break;
+    }
   },
 });
 ```
 
-### 配对码（验证码）流程
+> **注**：此模式下 Promise 在登录完成或到达终态时 resolve，返回值中的 `status` 告诉你最终结果。`onStatusChange` 回调是跟踪进度的主要方式。
 
-当微信检测到风险或异常活动时，可能要求在登录前输入**配对码**。流程如下：
+### 不提供回调参数 - 外部自行轮询
 
-1. 用户在手机上扫描二维码
-2. 服务端返回 `need_verifycode`——手机屏幕上会显示一个数字验证码
-3. `login()` 返回 `{ status: "need_verifycode", verifyCodePrompt }`——**你的前端必须获取用户输入**
-4. 用户从手机上读取验证码并在 UI 中输入
-5. 再次调用 `login()` 传入验证码：
+不传 `onStatusChange` 时，首次调用立即返回二维码 URL 和 session key（不阻塞）。调用方在循环中传入 `sessionKey` 再次调用 `login()` 来获取最新状态：
 
 ```typescript
-const result = await login(state, { verifyCode: userInput });
+import type { ILinkAdapter } from "@lanrenbang/chat-adapter-ilink";
 
-if (result.status === "success") {
-  console.log("已连接！账号：", result.accountId);
-} else if (result.status === "need_verifycode") {
-  // 验证码错误——重新提示用户
-  const retry = await promptUser(result.verifyCodePrompt!);
-  // 使用新验证码重试
+const adapter = bot.getAdapter("ilink") as ILinkAdapter;
+
+// 第 1 步：发起登录——立即返回
+const first = await adapter.login();
+// { qrcodeUrl: "...", sessionKey: "uuid-xxx", status: "wait", message: "..." }
+
+// 第 2 步：轮询直到终态
+let result = first;
+while (result.status === "wait" || result.status === "scaned" || result.status === "scaned_but_redirect") {
+  result = await adapter.login({ sessionKey: result.sessionKey });
+  await sleep(1000); // 1 秒间隔——上游长轮询本身已阻塞 35s
+}
+
+if (result.status === "confirmed") {
+  console.log("登录成功——账号已自动注册");
 }
 ```
 
-> 在 `need_verifycode` 返回后，二维码会话会被**保留**。无需生成新的二维码——用户已经扫过了。验证码与已经完成的扫码绑定。
+此模式适合 HTTP API 场景——后端发放 session，前端处理轮询。
+
+### 配对码
+
+当微信检测到风险时，可能要求输入**配对/验证码**（`status === "need_verifycode"`）。两种模式的处理方式相同：
+
+1. `adapter.login()` 返回 `{ status: "need_verifycode", message, sessionKey }`
+2. 你的应用获取用户从手机屏幕上读取的验证码
+3. 再次调用 `login()`，**同时**传入 `sessionKey` 和 `verifyCode`
+
+**外部轮询模式**（无回调）——你已经在循环中，直接处理：
+
+```typescript
+let result = await adapter.login();
+while (result.status === "wait" || result.status === "scaned" || result.status === "scaned_but_redirect") {
+  result = await adapter.login({ sessionKey: result.sessionKey });
+  await sleep(1000);
+}
+
+if (result.status === "need_verifycode") {
+  const code = await promptUser(result.message!); // e.g. "输入手机微信显示的数字："
+  result = await adapter.login({ sessionKey: result.sessionKey, verifyCode: code });
+}
+```
+
+**内部轮询模式**（有回调）——将 login 包装为递归函数，保留回调：
+
+```typescript
+async function loginWithVerifyCode(sessionKey?: string, verifyCode?: string) {
+  const result = await adapter.login({
+    sessionKey,
+    verifyCode,
+    onStatusChange: (status, _url, sk) => {
+      if (status === "need_verifycode") {
+        // 异步提示用户，然后递归
+        promptUser(result.message!).then((code) =>
+          loginWithVerifyCode(sk, code),
+        );
+      }
+    },
+  });
+  return result;
+}
+
+// 首次调用——不传 sessionKey
+const result = await loginWithVerifyCode();
+```
+
+> **必须传递 `sessionKey`** 重试——否则会生成新二维码，进入全新会话。原始扫码的二维码仍然有效，与那个 `sessionKey` 绑定。
+
+### Session key 持久化
+
+每个登录会话存储在 `StateAdapter` 中（5 分钟 TTL）。后续调用带上同样的 `sessionKey` 会恢复已有会话，两种模式均适用。
 
 ### 多账号管理
 
-一个 `ILinkAdapter` 实例可以管理多个机器人账号。每个账号拥有独立的长轮询循环：
+本适配器支持多个账号——每次 `login()` 调用创建独立的登录会话。`confirmed` 后账号自动注册到消息轮询中，无需手动干预。
 
-```typescript
-import { createILinkAdapter } from "@lanrenbang/chat-adapter-ilink";
-import { login } from "@lanrenbang/chat-adapter-ilink";
+### Cloudflare Agent 集成
 
-const adapter = createILinkAdapter();
-
-// 在 `bot.initialize()` 之后：
-// 1. 登录（从 CLI/Web/Agent）
-const result = await login(state, { onQRCode: console.log });
-
-// 2. 向适配器注册账号
-if (result.connected && result.botToken && result.accountId) {
-  await adapter.addAccount(result.accountId, {
-    token: result.botToken,
-    baseUrl: result.baseUrl,
-    userId: result.userId,
-  });
-  // 适配器会立即为此账号启动轮询循环
-}
-```
-
-账号信息持久化在 StateAdapter 中，下次调用 `initialize()` 时会自动恢复。
+关于在 Cloudflare Agent（Agents SDK）中使用本适配器的 Sub-Agent 模式实现登录状态隔离、`onBeforeSubAgent` 自动创建会话、以及回调式轮询的完整指南，请参考 [docs/integration.md](./docs/integration.md)。
 
 ## 配置项
 
@@ -167,7 +255,7 @@ ilink:{accountId}:{userId}
 以 `/` 开头的消息会自动路由到 Chat SDK 的 `onSlashCommand` 处理器。适配器端无需额外配置——只需在 bot 上设置处理器：
 
 ```typescript
-chat.onSlashCommand("/echo", async ({ args, thread }) => {
+bot.onSlashCommand("/echo", async ({ args, thread }) => {
   await thread.post({ text: `你说: ${args.join(" ")}` });
 });
 ```
@@ -180,7 +268,7 @@ chat.onSlashCommand("/echo", async ({ args, thread }) => {
 - `fetchMetadata()`：返回 `{ fileName, mimeType, fileSize, width, height, duration, description }`
 
 ```typescript
-adapter.on("message", async ({ thread, message }) => {
+bot.onNewMessage(async (thread, message) => {
   for (const attachment of message.attachments ?? []) {
     const buf = await attachment.fetchData();
     const meta = await attachment.fetchMetadata();

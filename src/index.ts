@@ -81,7 +81,7 @@ export {
   registerAccount,
 } from "./auth/accounts.js";
 export type { AccountCredentials } from "./auth/accounts.js";
-export { login } from "./auth/login.js";
+export type { LoginOptions, LoginResult, QRSessionStatus } from "./auth/login.js";
 
 export { monitorWeixinProvider } from "./monitor/monitor.js";
 

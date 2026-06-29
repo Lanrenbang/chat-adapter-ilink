@@ -5,13 +5,25 @@ const FIXED_BASE_URL = "https://ilinkai.weixin.qq.com";
 const QR_LONG_POLL_TIMEOUT_MS = 35_000;
 const QR_SESSION_TTL_MS = 5 * 60_000;
 const MAX_QR_REFRESH_COUNT = 3;
+/** Default login timeout (8 minutes), minimum 1s. */
 const DEFAULT_LOGIN_TIMEOUT_MS = 480_000;
 
 export const DEFAULT_ILINK_BOT_TYPE = "3";
 
 const QR_SESSION_PREFIX = "ilink:login:";
 
-type QRSessionStatus =
+/**
+ * Raw upstream QR status values returned by Weixin iLink API.
+ * - `wait` — waiting for scan
+ * - `scaned` — QR scanned by phone
+ * - `confirmed` — user confirmed login on phone
+ * - `expired` — QR code expired
+ * - `scaned_but_redirect` — scanned but needs IDC redirect
+ * - `need_verifycode` — pairing/verify code required
+ * - `verify_code_blocked` — too many incorrect verify codes
+ * - `binded_redirect` — already bound (valid token exists)
+ */
+export type QRSessionStatus =
   | "wait"
   | "scaned"
   | "confirmed"
@@ -29,7 +41,7 @@ type QRSessionData = {
   startedAt: number;
   currentBaseUrl: string;
   status?: QRSessionStatus;
-  /** Retry flag: set to "pending" on need_verifycode, cleared on success. */
+  /** Set to "pending" when a verify code is needed; cleared on success. */
   pendingVerifyCode?: string;
 };
 
@@ -51,109 +63,147 @@ export interface LoginOptions {
   verifyCode?: string;
   /** Bot type parameter (default: "3"). */
   botType?: string;
-  /** Login timeout in ms (default: 480000 = 8 min). Only used in internal polling mode. */
+  /** Login timeout in ms (default: 480000 = 8 min, minimum 1s). Only used in internal polling mode. */
   timeoutMs?: number;
   /**
    * Status change callback for internal polling mode.
-   * When provided, login() polls internally and calls this on each status transition.
-   * When omitted, login() returns immediately with single-shot result.
+   * When provided, `login()` polls internally and calls this on each status transition.
+   * When omitted, `login()` returns immediately with single-shot result.
    *
-   * @param status   - Current QR session status (always defined, default "wait")
+   * @param status    - Current QR session status (raw upstream value)
    * @param qrcodeUrl - QR code image URL (undefined if not yet generated)
    * @param sessionKey - Session identifier for resuming/resubmitting
    */
   onStatusChange?: (status: string, qrcodeUrl: string | undefined, sessionKey: string) => void;
 }
 
+/**
+ * Public login result — only exposes what the caller needs to display
+ * and interact with the login flow.
+ *
+ * - `status` — raw upstream QR status (the caller checks this to decide next action)
+ * - `qrcodeUrl` — QR image URL for display
+ * - `sessionKey` — opaque token to resume this session
+ * - `message` — human-readable prompt or error description
+ */
 export interface LoginResult {
-  connected: boolean;
-  alreadyConnected?: boolean;
+  status: QRSessionStatus;
+  /** QR code image URL (set when QR is generated). */
+  qrcodeUrl?: string;
+  /** Session key for resuming polling. */
+  sessionKey?: string;
+  /** Human-readable message (prompt, error, or status description). */
+  message?: string;
+}
+
+/**
+ * Extended internal result — carries bot credentials so the adapter can
+ * auto-register the account on success. Never exposed to end users.
+ */
+export type LoginResultInternal = LoginResult & {
   botToken?: string;
   accountId?: string;
   baseUrl?: string;
   userId?: string;
-  status: "success" | "need_verifycode" | "expired" | "blocked" | "error" | "wait";
-  verifyCodePrompt?: string;
-  error?: string;
-  /** QR code image URL (set in single-shot mode or alongside result). */
-  qrcodeUrl?: string;
-  /** Session key for resuming polling (set in single-shot mode). */
-  sessionKey?: string;
+};
+
+// ---------------------------------------------------------------------------
+// Message helpers (aligned with upstream openclaw-weixin)
+// ---------------------------------------------------------------------------
+
+function statusMessage(status: QRSessionStatus, detail?: string): string {
+  switch (status) {
+    case "wait":
+      return "用手机微信扫描以下二维码，以继续连接。";
+    case "scaned":
+      return "正在验证…";
+    case "confirmed":
+      return "已连接微信。";
+    case "binded_redirect":
+      return "已连接过此账号，无需重复连接。";
+    case "need_verifycode":
+      return detail ?? "请输入手机微信上显示的数字。";
+    case "verify_code_blocked":
+      return "多次输入错误，请稍后再试。";
+    case "expired":
+      return detail ?? "二维码已过期。";
+    case "scaned_but_redirect":
+      return "正在切换节点…";
+  }
 }
 
-/**
- * Unified QR login interface.
- *
- * Two modes:
- *
- * **1. Internal polling** (provide `onStatusChange`):
- *    - Generates QR (or resumes existing session)
- *    - Calls `onStatusChange("wait", qrcodeUrl, sessionKey)` immediately
- *    - Long-polls `get_qrcode_status` until resolution
- *    - Calls `onStatusChange` on each status transition
- *    - Resolves with final `LoginResult`
- *    - On `need_verifycode`: returns early — caller must retry with `verifyCode`
- *
- * **2. Single-shot** (no `onStatusChange`):
- *    - First call (no `sessionKey`): generates QR, returns immediately
- *      with `{ qrcodeUrl, sessionKey, status: "wait" }`
- *    - Subsequent calls (with `sessionKey`): loads session, makes one
- *      poll call, returns current status
- *    - Caller decides external polling strategy
- *
- * @param state   - StateAdapter instance (from Chat SDK or standalone)
- * @param options - Login options
- */
-export async function login(
+// ---------------------------------------------------------------------------
+// Login implementation
+// ---------------------------------------------------------------------------
+
+export async function loginImpl(
   state: StateAdapter,
   options: LoginOptions = {},
-): Promise<LoginResult> {
+): Promise<LoginResultInternal> {
   const sessionKey = options.sessionKey ?? crypto.randomUUID();
   const botType = options.botType ?? DEFAULT_ILINK_BOT_TYPE;
-  const isInternal = typeof options.onStatusChange === "function";
+  const hasCallback = typeof options.onStatusChange === "function";
 
+  // ---------- Phase 1: load or generate QR ----------
   let session: QRSessionData | undefined = await loadQRSession(state, sessionKey);
   if (!session || options.force) {
     const newSession = await generateNewQR(state, sessionKey, botType);
     if (!newSession) {
-      return { connected: false, status: "error", error: "获取二维码失败" };
+      return { status: "expired", message: "获取二维码失败。" };
     }
     session = newSession;
-    if (!session) {
-      return { connected: false, status: "error", error: "获取二维码失败" };
-    }
   }
 
-  if (isInternal) {
+  // ---------- Phase 2: decide mode ----------
+  if (hasCallback) {
+    // Internal polling mode — fire initial "wait" before the first long-poll
     options.onStatusChange!("wait", session.qrcodeUrl, sessionKey);
+    return pollLoop(state, session, options as Required<Pick<LoginOptions, "onStatusChange">> & LoginOptions, botType);
   }
 
-  if (!isInternal) {
-    try {
-      const pollResult = await pollQRStatus(
-        session.currentBaseUrl,
-        session.qrcode,
-        options.verifyCode,
-      );
-      session.status = pollResult.status;
-      await saveQRSession(state, sessionKey, session);
-      return {
-        connected: false,
-        status: mapStatusToResult(pollResult.status),
-        qrcodeUrl: session.qrcodeUrl,
-        sessionKey,
-      };
-    } catch {
-      return {
-        connected: false,
-        status: "wait",
-        qrcodeUrl: session.qrcodeUrl,
-        sessionKey,
-      };
-    }
+  // Single-shot mode
+  if (!options.sessionKey) {
+    // First call: return QR immediately, no poll
+    return {
+      status: "wait",
+      qrcodeUrl: session.qrcodeUrl,
+      sessionKey,
+      message: statusMessage("wait"),
+    };
   }
 
-  const timeoutMs = options.timeoutMs ?? DEFAULT_LOGIN_TIMEOUT_MS;
+  // Subsequent call with sessionKey: poll once
+  try {
+    const pollResult = await pollQRStatus(
+      session.currentBaseUrl,
+      session.qrcode,
+      options.verifyCode,
+    );
+    session.status = pollResult.status;
+    await saveQRSession(state, sessionKey, session);
+    return makeResult(pollResult, session.qrcodeUrl, sessionKey);
+  } catch {
+    return {
+      status: "wait",
+      qrcodeUrl: session.qrcodeUrl,
+      sessionKey,
+      message: statusMessage("wait"),
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Internal polling loop
+// ---------------------------------------------------------------------------
+
+async function pollLoop(
+  state: StateAdapter,
+  session: QRSessionData,
+  options: Required<Pick<LoginOptions, "onStatusChange">> & LoginOptions,
+  botType: string,
+): Promise<LoginResultInternal> {
+  const sessionKey = session.sessionKey;
+  const timeoutMs = Math.max(options.timeoutMs ?? DEFAULT_LOGIN_TIMEOUT_MS, 1000);
   const deadline = Date.now() + timeoutMs;
   let qrRefreshCount = 1;
 
@@ -162,8 +212,7 @@ export async function login(
 
     let statusResponse: StatusResponse;
     try {
-      const apiVerifyCode = options.verifyCode;
-      statusResponse = await pollQRStatus(currentBaseUrl, session.qrcode, apiVerifyCode);
+      statusResponse = await pollQRStatus(currentBaseUrl, session.qrcode, options.verifyCode);
     } catch (err) {
       console.debug(`login: poll error (will retry): ${String(err)}`);
       await sleep(1000);
@@ -172,7 +221,7 @@ export async function login(
 
     session.status = statusResponse.status;
     await saveQRSession(state, sessionKey, session);
-    options.onStatusChange!(statusResponse.status, session.qrcodeUrl, sessionKey);
+    options.onStatusChange(statusResponse.status, session.qrcodeUrl, sessionKey);
 
     switch (statusResponse.status) {
       case "wait":
@@ -185,17 +234,16 @@ export async function login(
 
       case "need_verifycode": {
         const isRetry = session.pendingVerifyCode !== undefined;
+        session.pendingVerifyCode = "pending";
+        await saveQRSession(state, sessionKey, session);
         const prompt = isRetry
           ? "❌ 配对码不匹配，请重新输入："
           : "输入手机微信显示的数字：";
-        session.pendingVerifyCode = "pending";
-        await saveQRSession(state, sessionKey, session);
         return {
-          connected: false,
           status: "need_verifycode",
-          verifyCodePrompt: prompt,
           qrcodeUrl: session.qrcodeUrl,
           sessionKey,
+          message: prompt,
         };
       }
 
@@ -204,29 +252,27 @@ export async function login(
         if (qrRefreshCount > MAX_QR_REFRESH_COUNT) {
           await deleteQRSession(state, sessionKey);
           return {
-            connected: false,
             status: "expired",
-            error: "二维码多次过期，登录流程已停止",
+            message: "二维码多次过期，登录流程已停止。",
           };
         }
-        const newQR = await refreshQR(state, sessionKey, botType);
-        if (!newQR) {
+        const newQr = await refreshQR(state, sessionKey, botType);
+        if (!newQr) {
           await deleteQRSession(state, sessionKey);
-          return { connected: false, status: "expired", error: "刷新二维码失败" };
+          return { status: "expired", message: "刷新二维码失败。" };
         }
-        session = newQR;
-        options.onStatusChange!("wait", session.qrcodeUrl, sessionKey);
+        session = newQr;
+        options.onStatusChange("wait", session.qrcodeUrl, sessionKey);
         break;
       }
 
       case "binded_redirect":
         await deleteQRSession(state, sessionKey);
         return {
-          connected: true,
-          alreadyConnected: true,
-          status: "success",
+          status: "binded_redirect",
           qrcodeUrl: session.qrcodeUrl,
           sessionKey,
+          message: statusMessage("binded_redirect"),
         };
 
       case "scaned_but_redirect": {
@@ -242,36 +288,36 @@ export async function login(
         qrRefreshCount++;
         if (qrRefreshCount > MAX_QR_REFRESH_COUNT) {
           await deleteQRSession(state, sessionKey);
-          return { connected: false, status: "blocked", error: "多次输入错误" };
+          return { status: "verify_code_blocked", message: "多次输入错误，登录流程已停止。" };
         }
         session.pendingVerifyCode = undefined;
-        const refreshAfterBlock = await refreshQR(state, sessionKey, botType);
-        if (!refreshAfterBlock) {
+        const refreshed = await refreshQR(state, sessionKey, botType);
+        if (!refreshed) {
           await deleteQRSession(state, sessionKey);
-          return { connected: false, status: "blocked", error: "多次输入错误" };
+          return { status: "verify_code_blocked", message: "多次输入错误。" };
         }
-        session = refreshAfterBlock;
-        options.onStatusChange!("wait", session.qrcodeUrl, sessionKey);
+        session = refreshed;
+        options.onStatusChange("wait", session.qrcodeUrl, sessionKey);
         break;
       }
 
       case "confirmed": {
         if (!statusResponse.ilink_bot_id) {
           await deleteQRSession(state, sessionKey);
-          return { connected: false, status: "error", error: "服务器未返回 ilink_bot_id" };
+          return { status: "expired", message: "登录失败：服务器未返回 ilink_bot_id。" };
         }
-        const result: LoginResult = {
-          connected: true,
-          status: "success",
+        await deleteQRSession(state, sessionKey);
+        return {
+          status: "confirmed",
+          qrcodeUrl: session.qrcodeUrl,
+          sessionKey,
+          message: statusMessage("confirmed"),
+          // Internal fields — consumed by adapter.login() for auto-registration
           botToken: statusResponse.bot_token,
           accountId: statusResponse.ilink_bot_id,
           baseUrl: statusResponse.baseurl,
           userId: statusResponse.ilink_user_id,
-          qrcodeUrl: session.qrcodeUrl,
-          sessionKey,
         };
-        await deleteQRSession(state, sessionKey);
-        return result;
       }
     }
 
@@ -279,8 +325,38 @@ export async function login(
   }
 
   await deleteQRSession(state, sessionKey);
-  return { connected: false, status: "expired", error: "登录超时" };
+  return { status: "expired", message: "登录超时，请重试。" };
 }
+
+// ---------------------------------------------------------------------------
+// Result builder for single-shot mode
+// ---------------------------------------------------------------------------
+
+function makeResult(
+  statusResponse: StatusResponse,
+  qrcodeUrl: string,
+  sessionKey: string,
+): LoginResultInternal {
+  const result: LoginResultInternal = {
+    status: statusResponse.status,
+    qrcodeUrl,
+    sessionKey,
+    message: statusMessage(statusResponse.status),
+  };
+
+  if (statusResponse.ilink_bot_id) {
+    result.accountId = statusResponse.ilink_bot_id;
+    result.botToken = statusResponse.bot_token;
+    result.baseUrl = statusResponse.baseurl;
+    result.userId = statusResponse.ilink_user_id;
+  }
+
+  return result;
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
 async function generateNewQR(
   state: StateAdapter,
@@ -362,9 +438,7 @@ async function loadQRSession(
   state: StateAdapter,
   sessionKey: string,
 ): Promise<QRSessionData | undefined> {
-  const data = await state.get<QRSessionData>(
-    `${QR_SESSION_PREFIX}${sessionKey}`,
-  );
+  const data = await state.get<QRSessionData>(`${QR_SESSION_PREFIX}${sessionKey}`);
   if (!data) return undefined;
   if (Date.now() - data.startedAt > QR_SESSION_TTL_MS) {
     await deleteQRSession(state, sessionKey);
@@ -420,24 +494,6 @@ async function refreshQR(
   } catch (err) {
     console.error(`login: failed to refresh QR: ${String(err)}`);
     return null;
-  }
-}
-
-function mapStatusToResult(status: QRSessionStatus): LoginResult["status"] {
-  switch (status) {
-    case "confirmed":
-    case "binded_redirect":
-      return "success";
-    case "need_verifycode":
-      return "need_verifycode";
-    case "expired":
-      return "expired";
-    case "verify_code_blocked":
-      return "blocked";
-    case "wait":
-    case "scaned":
-    case "scaned_but_redirect":
-      return "wait";
   }
 }
 

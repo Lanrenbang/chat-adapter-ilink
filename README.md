@@ -41,16 +41,51 @@ The adapter auto-detects `ILINK_BOT_TOKEN`, `ILINK_BASE_URL`, and `ILINK_CDN_BAS
 
 iLink is an open protocol from WeChat individual-account bot system, originally open-sourced through the [OpenClaw](https://github.com/Tencent/openclaw-weixin) plugin. It uses QR-code authentication — there is no API key or token to paste. You **must provide a QR-code display mechanism** in your application (CLI, web UI, or any other frontend).
 
-The `login()` function supports two modes:
+### LoginOptions
 
-### Mode 1: Internal polling (with `onStatusChange`)
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `sessionKey` | `string` | auto-generated | Resume an existing login session |
+| `force` | `boolean` | `false` | Skip QR cache and force new QR generation |
+| `verifyCode` | `string` | — | Pairing/verify code (for `need_verifycode` flow) |
+| `botType` | `string` | `"3"` | iLink bot type parameter |
+| `timeoutMs` | `number` | `480000` (8 min) | Login timeout (minimum 1000ms). Only used in internal polling mode |
+| `onStatusChange` | `(status, qrcodeUrl?, sessionKey) => void` | — | Callback for internal polling mode. When provided, `login()` polls internally and fires this on every status transition. When omitted, `login()` returns immediately |
 
-When you provide an `onStatusChange` callback, the adapter handles the entire login loop internally — generating the QR code, long-polling for status changes, QR refresh on expiry, and IDC redirect handling. The callback fires on every status transition:
+### LoginResult
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `status` | `QRSessionStatus` | Raw upstream QR status (see below) |
+| `qrcodeUrl` | `string \| undefined` | QR image URL for display |
+| `sessionKey` | `string \| undefined` | Opaque token to resume this session |
+| `message` | `string \| undefined` | Human-readable prompt or error description |
+
+### QR status values
+
+| Status | Meaning | Next action |
+|--------|---------|-------------|
+| `wait` | Waiting for user to scan QR | Display QR and wait |
+| `scaned` | QR scanned by phone, awaiting confirmation | Wait |
+| `confirmed` | User confirmed login on phone | ✅ **Login complete** — account auto-registered |
+| `binded_redirect` | Already bound (valid token exists) | ✅ Treated as success — already connected |
+| `expired` | QR code expired / login timed out | Generate new QR and retry |
+| `need_verifycode` | Pairing/verify code required | Capture user input and call `login()` with `verifyCode` |
+| `verify_code_blocked` | Too many incorrect verify codes | Wait and retry later |
+| `scaned_but_redirect` | Scanned but IDC redirect needed | Transient — adapter handles automatically |
+
+The adapter supports two login modes:
+
+### Internal polling mode (with callback)
+
+When you provide an `onStatusChange` callback, the adapter handles the entire login loop internally — QR generation, long-polling, expiry/redirect handling, and auto-registration on success. The callback fires on every status transition. The return value is informational only (status/message).
 
 ```typescript
-import { login } from "@lanrenbang/chat-adapter-ilink";
+import type { ILinkAdapter } from "@lanrenbang/chat-adapter-ilink";
 
-const result = await login(state, {
+const adapter = bot.getAdapter("ilink") as ILinkAdapter;
+
+const result = await adapter.login({
   onStatusChange: (status, qrcodeUrl, sessionKey) => {
     switch (status) {
       case "wait":
@@ -63,120 +98,101 @@ const result = await login(state, {
         console.log("Login confirmed!");
         break;
       case "need_verifycode":
-        console.log("Verify code required — capture user input and retry with verifyCode");
+        // See "Verify code flow" below
         break;
     }
   },
 });
 ```
 
-The Promise resolves with the final `LoginResult` once the login completes or reaches a terminal state.
+> **Note**: In this mode, the Promise resolves after login completes or reaches a terminal state. The `result.status` tells you the outcome, but the `onStatusChange` callback is the primary way to track progress.
 
-### Mode 2: Single-shot (no callback)
+### External polling mode (no callback)
 
-Without `onStatusChange`, `login()` returns immediately with a QR URL and session key. The caller manages polling externally:
+Without `onStatusChange`, the first call generates a QR and returns immediately. The caller then polls by calling `login()` again with the `sessionKey`:
 
 ```typescript
-// Step 1: Initiate login — get QR URL and session key
-const first = await login(state);
-// { qrcodeUrl: "...", sessionKey: "uuid-xxx", status: "wait" }
+import type { ILinkAdapter } from "@lanrenbang/chat-adapter-ilink";
 
-// Step 2: Poll periodically (from browser, CLI loop, etc.)
-const second = await login(state, { sessionKey: first.sessionKey });
-// { qrcodeUrl: "...", sessionKey: "uuid-xxx", status: "scaned" }
+const adapter = bot.getAdapter("ilink") as ILinkAdapter;
 
-// Continue until terminal status
+// Step 1: Initiate — get QR URL and sessionKey (returns immediately)
+const first = await adapter.login();
+// { qrcodeUrl: "...", sessionKey: "uuid-xxx", status: "wait", message: "..." }
+
+// Step 2: Poll until terminal status
+let result = first;
+while (result.status === "wait" || result.status === "scaned" || result.status === "scaned_but_redirect") {
+  result = await adapter.login({ sessionKey: result.sessionKey });
+  await sleep(1000); // 1s interval — upstream long-poll already blocks 35s
+}
+
+if (result.status === "confirmed") {
+  console.log("Login successful — account auto-registered");
+}
 ```
 
 This mode is ideal for HTTP API scenarios where the backend issues a session and the frontend handles the polling loop.
 
-### Pairing code (verify code) flow
+### Verify code flow (pairing code)
 
-When WeChat detects risk or unusual activity, it may require a **pairing code** before completing login. In internal polling mode, the function returns with `{ status: "need_verifycode", verifyCodePrompt }`. Capture the user's input and call `login()` again with `verifyCode`:
+When WeChat detects risk, it may require a **pairing/verify code** (`status === "need_verifycode"`). The flow works the same in both modes:
+
+1. `adapter.login()` returns with `{ status: "need_verifycode", message, sessionKey }`
+2. Your application captures the code from the user's phone screen
+3. Call `adapter.login()` again with **both** `sessionKey` and `verifyCode`
+
+**External polling mode (no callback)** — natural: you're already in a loop:
 
 ```typescript
-const result = await login(state, { onStatusChange });
+let result = await adapter.login();
+while (result.status === "wait" || result.status === "scaned" || result.status === "scaned_but_redirect") {
+  result = await adapter.login({ sessionKey: result.sessionKey });
+  await sleep(1000);
+}
 
 if (result.status === "need_verifycode") {
-  const userInput = await promptUser(result.verifyCodePrompt!);
-  const retry = await login(state, {
-    sessionKey: result.sessionKey,
-    verifyCode: userInput,
-    onStatusChange,
-  });
-  // retry.status === "success" | "need_verifycode" | ...
+  const code = await promptUser(result.message!); // e.g. "输入手机微信显示的数字："
+  result = await adapter.login({ sessionKey: result.sessionKey, verifyCode: code });
 }
 ```
 
-> The QR session is **preserved** across `need_verifycode` returns. Do not generate a new QR code — the user has already scanned it. The verify code is tied to the existing scan.
+**Internal polling mode (with callback)** — wrap login in a recursive function that preserves the callback:
+
+```typescript
+async function loginWithVerifyCode(sessionKey?: string, verifyCode?: string) {
+  const result = await adapter.login({
+    sessionKey,
+    verifyCode,
+    onStatusChange: (status, _url, sk) => {
+      if (status === "need_verifycode") {
+        // Prompt user asynchronously, then recurse
+        promptUser(result.message!).then((code) =>
+          loginWithVerifyCode(sk, code),
+        );
+      }
+    },
+  });
+  return result;
+}
+
+// First call — no sessionKey yet
+const result = await loginWithVerifyCode();
+```
+
+> **Must pass `sessionKey`** when retrying—otherwise a new QR is generated and a new session starts. The QR from the original scan is still valid and tied to that `sessionKey`.
 
 ### Session key persistence
 
-Each login session is stored in the `StateAdapter` with a 5-minute TTL. Subsequent calls with the same `sessionKey` will resume the existing session. This works across both modes.
+Each login session is stored in the `StateAdapter` with a 5-minute TTL. Subsequent calls with the same `sessionKey` resume the existing session (across both modes).
 
-### Multi-account management
+### Multi-account
 
-An `ILinkAdapter` instance can manage multiple bot accounts. Each account has its own long-poll loop:
+The adapter supports multiple accounts — each `login()` call creates an independent session. Accounts are automatically registered for message polling on `confirmed`.
 
-```typescript
-import { createILinkAdapter } from "@lanrenbang/chat-adapter-ilink";
-import { login } from "@lanrenbang/chat-adapter-ilink";
+### Cloudflare Agent integration
 
-const adapter = createILinkAdapter();
-
-const result = await login(state, { onStatusChange });
-
-if (result.connected && result.botToken && result.accountId) {
-  await adapter.addAccount(result.accountId, {
-    token: result.botToken,
-    baseUrl: result.baseUrl,
-    userId: result.userId,
-  });
-  // The adapter immediately starts a poll loop for this account
-}
-```
-
-Accounts persist in the StateAdapter and are restored automatically on next `initialize()`.
-
-### Agent integration (Sub-Agent pattern)
-
-When using this adapter inside a Cloudflare Agent (Agents SDK), wrap each login session in a Sub-Agent for storage isolation and direct client routing:
-
-```typescript
-import { Agent } from "agents";
-import { login } from "@lanrenbang/chat-adapter-ilink";
-
-// Parent agent — orchestrates login sessions
-class BotAgent extends Agent {
-  async startLogin(accountId: string) {
-    const session = await this.subAgent(LoginSession, `login:${accountId}`);
-    return session.getQRUrl();
-  }
-}
-
-// Login session sub-agent — isolated SQLite, no DO binding needed
-class LoginSession extends Agent {
-  private qrcodeUrl = "";
-
-  async onStart() {
-    const result = await login(this.state, {
-      onStatusChange: (status, url) => {
-        if (url) this.qrcodeUrl = url;
-        // Broadcast status updates via Agent state
-        this.setState({ loginStatus: status, qrcodeUrl: url });
-      },
-    });
-    // Store result in isolated storage
-    this.setState({ loginResult: result });
-  }
-
-  getQRUrl(): string {
-    return this.qrcodeUrl;
-  }
-}
-```
-
-No extra Durable Object bindings required — only the parent needs a DO binding. Child classes just need to be exported from the Worker entry point.
+For guidance on using this adapter inside a Cloudflare Agent (Agents SDK) with the Sub-Agent pattern for per-session login state isolation, auto-created sessions via `onBeforeSubAgent`, and callback-based polling, see [docs/integration.md](./docs/integration.md).
 
 ## Configuration
 
@@ -255,7 +271,7 @@ Supported attachment types: `image`, `audio`, `voice`, `video`, `file`. You do n
 Messages starting with `/` are routed to the Chat SDK's `onSlashCommand` handler automatically. No extra configuration is needed in the adapter — just set up your bot:
 
 ```typescript
-chat.onSlashCommand("/echo", async ({ args, thread }) => {
+bot.onSlashCommand("/echo", async ({ args, thread }) => {
   await thread.post({ text: `You said: ${args.join(" ")}` });
 });
 ```
@@ -268,7 +284,7 @@ The adapter automatically extracts non-text items from incoming messages as `Att
 - `fetchMetadata()`: returns `{ fileName, mimeType, fileSize, width, height, duration, description }`
 
 ```typescript
-adapter.on("message", async ({ thread, message }) => {
+bot.onNewMessage(async (thread, message) => {
   for (const attachment of message.attachments ?? []) {
     const buf = await attachment.fetchData();
     const meta = await attachment.fetchMetadata();
@@ -281,7 +297,9 @@ adapter.on("message", async ({ thread, message }) => {
 Voice messages can be converted to text via the adapter's public method:
 
 ```typescript
-const adapter = bot.getAdapter("ilink");
+import type { ILinkAdapter } from "@lanrenbang/chat-adapter-ilink";
+
+const adapter = bot.getAdapter("ilink") as ILinkAdapter;
 const wav = await adapter.transcribeVoice(silkBuffer);
 // Returns WAV Buffer, or null if silk-wasm is unavailable
 ```
