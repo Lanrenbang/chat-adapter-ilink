@@ -5,7 +5,7 @@ import { buildRefMessageReq } from "./messaging/send.js";
 import type { Attachment, Message } from "chat";
 
 function createAdapter(): ILinkAdapter {
-  return new ILinkAdapter({ pollingEnabled: false });
+  return new ILinkAdapter();
 }
 
 function cdnMedia(overrides: Partial<CDNMedia> = {}): CDNMedia {

@@ -23,8 +23,4 @@ describe("createILinkAdapter", () => {
     expect(adapter.name).toBe("ilink");
   });
 
-  it("disables polling when pollingEnabled is false", () => {
-    const adapter = createILinkAdapter({ pollingEnabled: false });
-    expect(adapter.name).toBe("ilink");
-  });
 });

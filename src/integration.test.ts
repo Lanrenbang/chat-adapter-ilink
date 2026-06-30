@@ -28,7 +28,7 @@ describe("iLink adapter integration", () => {
   beforeEach(async () => {
     state = createMemoryState();
     await state.connect();
-    adapter = new ILinkAdapter({ pollingEnabled: false });
+    adapter = new ILinkAdapter();
     chat = new Chat({
       userName: "ilink-bot",
       adapters: { ilink: adapter },

@@ -205,7 +205,6 @@ const result = await loginWithVerifyCode();
 | `routeTag` | `string` | — | 多区域路由标签 |
 | `userName` | `string` | `"ilink-bot"` | 机器人显示名称 |
 | `logger` | `Logger` | `ConsoleLogger("info")` | 自定义日志记录器 |
-| `pollingEnabled` | `boolean` | `true` | 设为 `false` 禁用自动轮询 |
 | `state` | `StateAdapter` | — | 状态适配器（扫码会话及多账号管理必需） |
 
 ## 环境变量

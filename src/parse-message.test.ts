@@ -4,7 +4,7 @@ import { MessageItemType, MessageType, type CDNMedia, type ImageItem, type Voice
 import type { Attachment } from "chat";
 
 function createAdapter(): ILinkAdapter {
-  return new ILinkAdapter({ pollingEnabled: false });
+  return new ILinkAdapter();
 }
 
 function textMsg(overrides: Partial<WeixinMessage> = {}): WeixinMessage {

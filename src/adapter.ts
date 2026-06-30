@@ -63,8 +63,7 @@ export type ILinkAdapterConfig = {
   state?: StateAdapter;
   formatConverter?: ILinkFormatConverter;
   logger?: Logger;
-  /** When true, starts polling on initialize (default: true). */
-  pollingEnabled?: boolean;
+
 };
 
 type InternalPollLoop = {
@@ -79,7 +78,7 @@ export class ILinkAdapter implements Adapter {
 
   readonly formatConverter: ILinkFormatConverter;
 
-  private config: Required<Pick<ILinkAdapterConfig, "baseUrl" | "cdnBaseUrl" | "longPollTimeoutMs" | "pollingEnabled">>;
+  private config: Required<Pick<ILinkAdapterConfig, "baseUrl" | "cdnBaseUrl" | "longPollTimeoutMs">>;
   private chat: ChatInstance | null = null;
   private state: StateAdapter | null = null;
   private logger: Logger;
@@ -92,7 +91,7 @@ export class ILinkAdapter implements Adapter {
       baseUrl: config.baseUrl ?? DEFAULT_BASE_URL,
       cdnBaseUrl: config.cdnBaseUrl ?? CDN_BASE_URL,
       longPollTimeoutMs: config.longPollTimeoutMs ?? 35_000,
-      pollingEnabled: config.pollingEnabled ?? true,
+
     };
     this.formatConverter = config.formatConverter ?? new ILinkFormatConverter();
     this.logger = config.logger ?? new ConsoleLogger("info", ADAPTER_NAME);
@@ -107,11 +106,6 @@ export class ILinkAdapter implements Adapter {
     this.chat = chat;
     this.logger = chat.getLogger(ADAPTER_NAME);
     this.state = chat.getState();
-
-    if (!this.config.pollingEnabled) {
-      this.logger.info("Polling disabled via config");
-      return;
-    }
 
     const accounts = await listAccounts(this.state);
     this.logger.info(`Found ${accounts.length} existing account(s)`);

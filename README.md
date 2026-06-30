@@ -205,7 +205,6 @@ For guidance on using this adapter inside a Cloudflare Agent (Agents SDK) with t
 | `routeTag` | `string` | — | Route tag for multi-region routing |
 | `userName` | `string` | `"ilink-bot"` | Bot display name |
 | `logger` | `Logger` | `ConsoleLogger("info")` | Custom logger |
-| `pollingEnabled` | `boolean` | `true` | Set to `false` to skip auto-polling |
 | `state` | `StateAdapter` | — | State adapter (required for QR sessions + multi-account) |
 
 ## Environment variables
