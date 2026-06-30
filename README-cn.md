@@ -50,7 +50,7 @@ iLink 是微信个人版机器人体系中的开放协议，最初通过 [OpenCl
 | `verifyCode` | `string` | — | 配对/验证码（用于 `need_verifycode` 流程） |
 | `botType` | `string` | `"3"` | iLink 机器人类型参数 |
 | `timeoutMs` | `number` | `480000` (8 分钟) | 登录超时（最小 1000ms），仅内部轮询模式有效 |
-| `onStatusChange` | `(status, qrcodeUrl?, sessionKey) => void` | — | 内部轮询回调。提供时自动轮询，省略时立即返回 |
+| `onStatusChange` | `(result: LoginResult) => void` | — | 内部轮询回调。提供时自动轮询，省略时立即返回 |
 
 ### LoginResult
 
@@ -86,10 +86,10 @@ import type { ILinkAdapter } from "@lanrenbang/chat-adapter-ilink";
 const adapter = bot.getAdapter("ilink") as ILinkAdapter;
 
 const result = await adapter.login({
-  onStatusChange: (status, qrcodeUrl, sessionKey) => {
-    switch (status) {
+  onStatusChange: (result) => {
+    switch (result.status) {
       case "wait":
-        console.log("请在微信中扫描二维码：", qrcodeUrl);
+        console.log("请在微信中扫描二维码：", result.qrcodeUrl);
         break;
       case "scaned":
         console.log("二维码已扫描，等待确认...");
@@ -164,11 +164,11 @@ async function loginWithVerifyCode(sessionKey?: string, verifyCode?: string) {
   const result = await adapter.login({
     sessionKey,
     verifyCode,
-    onStatusChange: (status, _url, sk) => {
-      if (status === "need_verifycode") {
+    onStatusChange: (result) => {
+      if (result.status === "need_verifycode") {
         // 异步提示用户，然后递归
         promptUser(result.message!).then((code) =>
-          loginWithVerifyCode(sk, code),
+          loginWithVerifyCode(result.sessionKey, code),
         );
       }
     },

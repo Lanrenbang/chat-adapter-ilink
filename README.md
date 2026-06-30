@@ -50,7 +50,7 @@ iLink is an open protocol from WeChat individual-account bot system, originally 
 | `verifyCode` | `string` | — | Pairing/verify code (for `need_verifycode` flow) |
 | `botType` | `string` | `"3"` | iLink bot type parameter |
 | `timeoutMs` | `number` | `480000` (8 min) | Login timeout (minimum 1000ms). Only used in internal polling mode |
-| `onStatusChange` | `(status, qrcodeUrl?, sessionKey) => void` | — | Callback for internal polling mode. When provided, `login()` polls internally and fires this on every status transition. When omitted, `login()` returns immediately |
+| `onStatusChange` | `(result: LoginResult) => void` | — | Callback for internal polling mode. When provided, `login()` polls internally and fires this on every status transition. When omitted, `login()` returns immediately |
 
 ### LoginResult
 
@@ -86,10 +86,10 @@ import type { ILinkAdapter } from "@lanrenbang/chat-adapter-ilink";
 const adapter = bot.getAdapter("ilink") as ILinkAdapter;
 
 const result = await adapter.login({
-  onStatusChange: (status, qrcodeUrl, sessionKey) => {
-    switch (status) {
+  onStatusChange: (result) => {
+    switch (result.status) {
       case "wait":
-        console.log("Scan this QR code in WeChat:", qrcodeUrl);
+        console.log("Scan this QR code in WeChat:", result.qrcodeUrl);
         break;
       case "scaned":
         console.log("QR scanned by phone, waiting for confirmation...");
@@ -164,11 +164,11 @@ async function loginWithVerifyCode(sessionKey?: string, verifyCode?: string) {
   const result = await adapter.login({
     sessionKey,
     verifyCode,
-    onStatusChange: (status, _url, sk) => {
-      if (status === "need_verifycode") {
+    onStatusChange: (result) => {
+      if (result.status === "need_verifycode") {
         // Prompt user asynchronously, then recurse
         promptUser(result.message!).then((code) =>
-          loginWithVerifyCode(sk, code),
+          loginWithVerifyCode(result.sessionKey, code),
         );
       }
     },
