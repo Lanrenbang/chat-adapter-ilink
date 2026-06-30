@@ -32,9 +32,10 @@ Browser                          MainAgent                        LoginSession(s
   │                                  │── schedule(0, "runLogin", …)    │
   │                                  │                                  │
   │                                  │── [alarm fires] runLogin()      │
-  │                                  │   adapter.login() → QR          │
-  │                                  │── RPC: session.start(qrUrl, sk) │
-  │←── setState({ status, qrUrl }) ──│                                  │
+  │                                  │   adapter.login({ onStatusChange })│
+  │                                  │   1st cb: "wait", qrUrl, sk      │
+  │                                  │── RPC: onStatusUpdate("wait", …) │
+  │←── setState({ status, qrUrl, sk })│                                  │
   │   render QR code                 │                                  │
   │                                  │                                  │
   │                                  │   adapter login polling loop     │
@@ -104,28 +105,22 @@ export class MainAgent extends Agent<Env> {
 
   // Called by LoginSession via parentAgent() RPC when WebSocket connects
   async startLogin(subId: string) {
-    // Schedule the alarm-based login to keep the DO alive during polling
+    // Schedule the alarm to keep the DO alive during the full login lifecycle.
+    // Without schedule, a fire-and-forget promise may be suspended by DO hibernation.
     await this.schedule(0, "runLogin", { subId });
   }
 
   // Alarm handler — runs the full login lifecycle
   async runLogin({ subId }: { subId: string }) {
-    // 1. Single-shot: get QR + sessionKey
-    const first = await this.adapter.login();
-    if (!first.qrcodeUrl || !first.sessionKey) return;
-
-    // 2. Push initial state to Sub-Agent → WebSocket → frontend shows QR
-    const session = await this.subAgent(LoginSession, subId);
-    await session.start(first.qrcodeUrl, first.sessionKey);
-
-    // 3. Callback-based polling — adapter handles all internal loops
-    //    The callback fires on each status transition and pushes to Sub-Agent
-    //    The Promise resolves when login reaches terminal (confirmed/expired)
+    // Directly start callback-based polling.
+    // The adapter fires the first callback with "wait", qrcodeUrl, and sessionKey
+    // BEFORE entering the long-poll loop (see loginImpl in login.ts).
+    // That first callback immediately pushes the QR info to LoginSession via RPC,
+    // which syncs to the frontend via setState() — no HTTP round-trip needed.
     await this.adapter.login({
-      sessionKey: first.sessionKey,
-      onStatusChange: async (status, qrcodeUrl) => {
+      onStatusChange: async (status, qrcodeUrl, sessionKey) => {
         const s = await this.subAgent(LoginSession, subId);
-        await s.onStatusUpdate(status, qrcodeUrl);
+        await s.onStatusUpdate(status, qrcodeUrl, sessionKey);
       },
     });
     // Login complete — adapter auto-registered the account on confirmed
@@ -162,14 +157,14 @@ export class LoginSession extends Agent<Env, LoginState> {
     await parent.startLogin(this.name); // this.name === subId
   }
 
-  // Called by MainAgent via RPC — set initial QR state
-  async start(qrcodeUrl: string, sessionKey: string) {
-    this.setState({ status: "wait", qrcodeUrl, sessionKey });
-  }
-
-  // Called by MainAgent via RPC — push each status transition
-  async onStatusUpdate(status: string, qrcodeUrl?: string) {
-    this.setState({ status, qrcodeUrl: qrcodeUrl ?? this.state.qrcodeUrl });
+  // Called by MainAgent via RPC — push each status transition.
+  // The first call fires before the long-poll starts, immediately giving
+  // the frontend qrcodeUrl and sessionKey to render the QR code.
+  async onStatusUpdate(status: string, qrcodeUrl?: string, sessionKey?: string) {
+    const update: Partial<LoginState> = { status };
+    if (qrcodeUrl) update.qrcodeUrl = qrcodeUrl;
+    if (sessionKey) update.sessionKey = sessionKey;
+    this.setState(update as LoginState);
   }
 }
 ```
