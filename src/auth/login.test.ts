@@ -105,12 +105,11 @@ describe("ILinkAdapter.login", () => {
 
       await adapter.login({ onStatusChange, timeoutMs: 100 });
 
-      expect(onStatusChange).toHaveBeenNthCalledWith(
-        1,
-        "wait",
-        QR1.qrcode_img_content,
-        expect.any(String),
-      );
+      expect(onStatusChange).toHaveBeenNthCalledWith(1, {
+        status: "wait",
+        qrcodeUrl: QR1.qrcode_img_content,
+        sessionKey: expect.any(String),
+      });
     }, 10000);
 
     it("returns confirmed and auto-registers", async () => {

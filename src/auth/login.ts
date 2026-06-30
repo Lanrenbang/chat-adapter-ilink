@@ -69,12 +69,8 @@ export interface LoginOptions {
    * Status change callback for internal polling mode.
    * When provided, `login()` polls internally and calls this on each status transition.
    * When omitted, `login()` returns immediately with single-shot result.
-   *
-   * @param status    - Current QR session status (raw upstream value)
-   * @param qrcodeUrl - QR code image URL (undefined if not yet generated)
-   * @param sessionKey - Session identifier for resuming/resubmitting
    */
-  onStatusChange?: (status: string, qrcodeUrl: string | undefined, sessionKey: string) => void;
+  onStatusChange?: (result: LoginResult) => void;
 }
 
 /**
@@ -157,7 +153,7 @@ export async function loginImpl(
   // ---------- Phase 2: decide mode ----------
   if (hasCallback) {
     // Internal polling mode — fire initial "wait" before the first long-poll
-    options.onStatusChange!("wait", session.qrcodeUrl, sessionKey);
+    options.onStatusChange!({ status: "wait", qrcodeUrl: session.qrcodeUrl, sessionKey });
     return pollLoop(state, session, options as Required<Pick<LoginOptions, "onStatusChange">> & LoginOptions, botType);
   }
 
@@ -221,7 +217,7 @@ async function pollLoop(
 
     session.status = statusResponse.status;
     await saveQRSession(state, sessionKey, session);
-    options.onStatusChange(statusResponse.status, session.qrcodeUrl, sessionKey);
+    options.onStatusChange({ status: statusResponse.status, qrcodeUrl: session.qrcodeUrl, sessionKey });
 
     switch (statusResponse.status) {
       case "wait":
@@ -262,7 +258,7 @@ async function pollLoop(
           return { status: "expired", message: "刷新二维码失败。" };
         }
         session = newQr;
-        options.onStatusChange("wait", session.qrcodeUrl, sessionKey);
+        options.onStatusChange({ status: "wait", qrcodeUrl: session.qrcodeUrl, sessionKey });
         break;
       }
 
@@ -297,7 +293,7 @@ async function pollLoop(
           return { status: "verify_code_blocked", message: "多次输入错误。" };
         }
         session = refreshed;
-        options.onStatusChange("wait", session.qrcodeUrl, sessionKey);
+        options.onStatusChange({ status: "wait", qrcodeUrl: session.qrcodeUrl, sessionKey });
         break;
       }
 
