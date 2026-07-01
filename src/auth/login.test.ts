@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { createMemoryState } from "@chat-adapter/state-memory";
 import type { StateAdapter, ChatInstance, Logger } from "chat";
 import { createILinkAdapter } from "../factory.js";
@@ -300,18 +300,19 @@ describe("ILinkAdapter.login", () => {
         JSON.stringify({ status: "confirmed", ilink_bot_id: "bot_xyz@im.bot", bot_token: "tok_secret" }),
       );
 
-      const result: Record<string, unknown> = await adapter.login({
+      const result = await adapter.login({
         onStatusChange: vi.fn(),
         timeoutMs: 10000,
       });
 
       expect(result.status).toBe("confirmed");
-      expect(result.botToken).toBeUndefined();
-      expect(result.accountId).toBeUndefined();
-      expect(result.baseUrl).toBeUndefined();
-      expect(result.userId).toBeUndefined();
-      expect(result.connected).toBeUndefined();
-      expect(result.alreadyConnected).toBeUndefined();
+      // Public result must NOT expose internal fields
+      expect((result as any).botToken).toBeUndefined();
+      expect((result as any).accountId).toBeUndefined();
+      expect((result as any).baseUrl).toBeUndefined();
+      expect((result as any).userId).toBeUndefined();
+      expect((result as any).connected).toBeUndefined();
+      expect((result as any).alreadyConnected).toBeUndefined();
     }, 10000);
   });
 });

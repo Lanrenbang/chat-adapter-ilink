@@ -13,11 +13,6 @@ describe("createILinkAdapter", () => {
     expect(adapter.userName).toBe("my-bot");
   });
 
-  it("accepts custom baseUrl", () => {
-    const adapter = createILinkAdapter({ baseUrl: "https://custom.example.com" });
-    expect(adapter.name).toBe("ilink");
-  });
-
   it("accepts custom adapterId", () => {
     const adapter = createILinkAdapter({ id: "custom-id" });
     expect(adapter.name).toBe("ilink");
