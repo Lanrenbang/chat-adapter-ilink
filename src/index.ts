@@ -85,4 +85,4 @@ export type { LoginOptions, LoginResult, QRSessionStatus } from "./auth/login.js
 
 export { monitorWeixinProvider } from "./monitor/monitor.js";
 
-export { VERSION, APP_ID, CLIENT_VERSION } from "./version.js";
+export { ADAPTER_VERSION, VERSION, APP_ID, CLIENT_VERSION } from "./version.js";

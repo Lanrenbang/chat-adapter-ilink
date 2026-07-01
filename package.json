@@ -1,8 +1,9 @@
 {
   "name": "@lanrenbang/chat-adapter-ilink",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Weixin iLink bot adapter for Chat SDK",
   "ilink_appid": "bot",
+  "ilink_version": "2.4.3",
   "type": "module",
   "main": "./dist/index.js",
   "module": "./dist/index.js",

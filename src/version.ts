@@ -2,10 +2,19 @@
  * Build-time version constants.
  * Injected by tsup `define`; fall back to defaults when undefined (e.g. in test).
  */
+declare const __ADAPTER_VERSION__: string;
 declare const __ILINK_VERSION__: string;
 declare const __ILINK_APP_ID__: string;
 
-/** Plugin version (from package.json). */
+/** Adapter package version (from package.json `version`). */
+export const ADAPTER_VERSION = (
+  typeof __ADAPTER_VERSION__ !== "undefined" ? __ADAPTER_VERSION__ : "0.0.0"
+) as string;
+
+/**
+ * Upstream iLink protocol version (from package.json `ilink_version`).
+ * This is the openclaw-weixin version this adapter is based on.
+ */
 export const VERSION = (
   typeof __ILINK_VERSION__ !== "undefined" ? __ILINK_VERSION__ : "0.0.0"
 ) as string;
@@ -28,5 +37,5 @@ export function buildClientVersion(version: string): number {
   return ((major & 0xff) << 16) | ((minor & 0xff) << 8) | (patch & 0xff);
 }
 
-/** Pre-computed client version integer. */
+/** Pre-computed client version integer (based on upstream iLink version). */
 export const CLIENT_VERSION = buildClientVersion(VERSION);

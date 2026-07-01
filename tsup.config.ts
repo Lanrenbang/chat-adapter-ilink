@@ -9,7 +9,8 @@ export default {
   sourcemap: true,
   clean: true,
   define: {
-    __ILINK_VERSION__: JSON.stringify(pkg.version ?? "0.0.0"),
+    __ADAPTER_VERSION__: JSON.stringify(pkg.version ?? "0.0.0"),
+    __ILINK_VERSION__: JSON.stringify(pkg.ilink_version ?? "0.0.0"),
     __ILINK_APP_ID__: JSON.stringify(pkg.ilink_appid ?? "bot"),
   },
 };
