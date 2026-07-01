@@ -51,19 +51,19 @@ import { extractPostableAttachments, extractFiles } from "@chat-adapter/shared";
 export const ADAPTER_NAME = "ilink";
 
 export type ILinkAdapterConfig = {
-  adapterId?: string;
+  /** Bot display name (Chat SDK convention). */
   userName?: string;
-  baseUrl?: string;
-  cdnBaseUrl?: string;
+  /** Self-declared bot agent identifier (UA-style, for observability/log attribution only). */
   botAgent?: string;
+  /** Route tag for multi-region routing (only needed in special deployments). */
   routeTag?: string;
-  token?: string;
-  accountId?: string;
+  /** Long-poll timeout for message receiving (default: 35000ms). */
   longPollTimeoutMs?: number;
-  state?: StateAdapter;
-  formatConverter?: ILinkFormatConverter;
+  /** Custom logger (Chat SDK Logger type; defaults to ConsoleLogger("info")). */
   logger?: Logger;
-
+  /** Custom format converter. */
+  formatConverter?: ILinkFormatConverter;
+  adapterId?: string;
 };
 
 type InternalPollLoop = {
@@ -78,7 +78,7 @@ export class ILinkAdapter implements Adapter {
 
   readonly formatConverter: ILinkFormatConverter;
 
-  private config: Required<Pick<ILinkAdapterConfig, "baseUrl" | "cdnBaseUrl" | "longPollTimeoutMs">>;
+  private longPollTimeoutMs: number;
   private chat: ChatInstance | null = null;
   private state: StateAdapter | null = null;
   private logger: Logger;
@@ -87,12 +87,7 @@ export class ILinkAdapter implements Adapter {
 
   constructor(config: ILinkAdapterConfig = {}) {
     this.userName = config.userName ?? "ilink-bot";
-    this.config = {
-      baseUrl: config.baseUrl ?? DEFAULT_BASE_URL,
-      cdnBaseUrl: config.cdnBaseUrl ?? CDN_BASE_URL,
-      longPollTimeoutMs: config.longPollTimeoutMs ?? 35_000,
-
-    };
+    this.longPollTimeoutMs = config.longPollTimeoutMs ?? 35_000;
     this.formatConverter = config.formatConverter ?? new ILinkFormatConverter();
     this.logger = config.logger ?? new ConsoleLogger("info", ADAPTER_NAME);
 
@@ -176,8 +171,8 @@ export class ILinkAdapter implements Adapter {
         attachments.push({
           type: "image",
           mimeType: "image/*",
-          fetchMetadata: { mediaType: "image", encryptQueryParam, aesKeyBase64, cdnBaseUrl: this.config.cdnBaseUrl, fullUrl: fullUrl ?? "" },
-          fetchData: () => this.downloadAndDecryptMedia(encryptQueryParam, aesKeyBase64, this.config.cdnBaseUrl, fullUrl),
+          fetchMetadata: { mediaType: "image", encryptQueryParam, aesKeyBase64, cdnBaseUrl: CDN_BASE_URL, fullUrl: fullUrl ?? "" },
+          fetchData: () => this.downloadAndDecryptMedia(encryptQueryParam, aesKeyBase64, CDN_BASE_URL, fullUrl),
         });
       } else if (item.type === MessageItemType.VOICE) {
         const voice = item.voice_item;
@@ -188,9 +183,9 @@ export class ILinkAdapter implements Adapter {
         attachments.push({
           type: "audio",
           mimeType: "audio/silk",
-          fetchMetadata: { mediaType: "voice", encryptQueryParam, aesKeyBase64, cdnBaseUrl: this.config.cdnBaseUrl, fullUrl: fullUrl ?? "" },
+          fetchMetadata: { mediaType: "voice", encryptQueryParam, aesKeyBase64, cdnBaseUrl: CDN_BASE_URL, fullUrl: fullUrl ?? "" },
           fetchData: async () => {
-            const decrypted = await this.downloadAndDecryptMedia(encryptQueryParam, aesKeyBase64, this.config.cdnBaseUrl, fullUrl);
+            const decrypted = await this.downloadAndDecryptMedia(encryptQueryParam, aesKeyBase64, CDN_BASE_URL, fullUrl);
             const wav = await transcribeSilkToWav(decrypted);
             return wav ?? decrypted;
           },
@@ -205,8 +200,8 @@ export class ILinkAdapter implements Adapter {
           type: "file",
           name: file.file_name,
           mimeType: "application/octet-stream",
-          fetchMetadata: { mediaType: "file", encryptQueryParam, aesKeyBase64, cdnBaseUrl: this.config.cdnBaseUrl, fullUrl: fullUrl ?? "", fileName: file.file_name ?? "" },
-          fetchData: () => this.downloadAndDecryptMedia(encryptQueryParam, aesKeyBase64, this.config.cdnBaseUrl, fullUrl),
+          fetchMetadata: { mediaType: "file", encryptQueryParam, aesKeyBase64, cdnBaseUrl: CDN_BASE_URL, fullUrl: fullUrl ?? "", fileName: file.file_name ?? "" },
+          fetchData: () => this.downloadAndDecryptMedia(encryptQueryParam, aesKeyBase64, CDN_BASE_URL, fullUrl),
         });
       } else if (item.type === MessageItemType.VIDEO) {
         const video = item.video_item;
@@ -217,8 +212,8 @@ export class ILinkAdapter implements Adapter {
         attachments.push({
           type: "video",
           mimeType: "video/mp4",
-          fetchMetadata: { mediaType: "video", encryptQueryParam, aesKeyBase64, cdnBaseUrl: this.config.cdnBaseUrl, fullUrl: fullUrl ?? "" },
-          fetchData: () => this.downloadAndDecryptMedia(encryptQueryParam, aesKeyBase64, this.config.cdnBaseUrl, fullUrl),
+          fetchMetadata: { mediaType: "video", encryptQueryParam, aesKeyBase64, cdnBaseUrl: CDN_BASE_URL, fullUrl: fullUrl ?? "" },
+          fetchData: () => this.downloadAndDecryptMedia(encryptQueryParam, aesKeyBase64, CDN_BASE_URL, fullUrl),
         });
       }
     }
@@ -232,7 +227,7 @@ export class ILinkAdapter implements Adapter {
     return {
       ...attachment,
       fetchData: () => this.downloadAndDecryptMedia(
-        encryptQueryParam, aesKeyBase64, cdnBaseUrl ?? this.config.cdnBaseUrl, fullUrl,
+        encryptQueryParam, aesKeyBase64, cdnBaseUrl ?? CDN_BASE_URL, fullUrl,
       ),
     };
   }
@@ -285,8 +280,8 @@ export class ILinkAdapter implements Adapter {
             result.attachments.push({
               type: "image",
               mimeType: "image/*",
-              fetchMetadata: { mediaType: "image", encryptQueryParam: encQueryParam, aesKeyBase64, cdnBaseUrl: this.config.cdnBaseUrl, fullUrl: fullUrl ?? "" },
-              fetchData: () => this.downloadAndDecryptMedia(encQueryParam, aesKeyBase64, this.config.cdnBaseUrl, fullUrl),
+              fetchMetadata: { mediaType: "image", encryptQueryParam: encQueryParam, aesKeyBase64, cdnBaseUrl: CDN_BASE_URL, fullUrl: fullUrl ?? "" },
+              fetchData: () => this.downloadAndDecryptMedia(encQueryParam, aesKeyBase64, CDN_BASE_URL, fullUrl),
             });
           } else {
             this.logger.debug("extractQuotedContent: skipped quoted image — missing aesKey and full_url");
@@ -301,9 +296,9 @@ export class ILinkAdapter implements Adapter {
           result.attachments.push({
             type: "audio",
             mimeType: "audio/silk",
-            fetchMetadata: { mediaType: "voice", encryptQueryParam: encQueryParam, aesKeyBase64, cdnBaseUrl: this.config.cdnBaseUrl, fullUrl: fullUrl ?? "" },
+            fetchMetadata: { mediaType: "voice", encryptQueryParam: encQueryParam, aesKeyBase64, cdnBaseUrl: CDN_BASE_URL, fullUrl: fullUrl ?? "" },
             fetchData: async () => {
-              const decrypted = await this.downloadAndDecryptMedia(encQueryParam, aesKeyBase64, this.config.cdnBaseUrl, fullUrl);
+              const decrypted = await this.downloadAndDecryptMedia(encQueryParam, aesKeyBase64, CDN_BASE_URL, fullUrl);
               return (await transcribeSilkToWav(decrypted)) ?? decrypted;
             },
           });
@@ -319,8 +314,8 @@ export class ILinkAdapter implements Adapter {
             type: "file",
             name: fileName,
             mimeType: "application/octet-stream",
-            fetchMetadata: { mediaType: "file", encryptQueryParam: encQueryParam, aesKeyBase64, cdnBaseUrl: this.config.cdnBaseUrl, fullUrl: fullUrl ?? "", fileName: fileName ?? "" },
-            fetchData: () => this.downloadAndDecryptMedia(encQueryParam, aesKeyBase64, this.config.cdnBaseUrl, fullUrl),
+            fetchMetadata: { mediaType: "file", encryptQueryParam: encQueryParam, aesKeyBase64, cdnBaseUrl: CDN_BASE_URL, fullUrl: fullUrl ?? "", fileName: fileName ?? "" },
+            fetchData: () => this.downloadAndDecryptMedia(encQueryParam, aesKeyBase64, CDN_BASE_URL, fullUrl),
           });
         }
       } else if (quotedItem.type === MessageItemType.VIDEO) {
@@ -332,8 +327,8 @@ export class ILinkAdapter implements Adapter {
           result.attachments.push({
             type: "video",
             mimeType: "video/mp4",
-            fetchMetadata: { mediaType: "video", encryptQueryParam: encQueryParam, aesKeyBase64, cdnBaseUrl: this.config.cdnBaseUrl, fullUrl: fullUrl ?? "" },
-            fetchData: () => this.downloadAndDecryptMedia(encQueryParam, aesKeyBase64, this.config.cdnBaseUrl, fullUrl),
+            fetchMetadata: { mediaType: "video", encryptQueryParam: encQueryParam, aesKeyBase64, cdnBaseUrl: CDN_BASE_URL, fullUrl: fullUrl ?? "" },
+            fetchData: () => this.downloadAndDecryptMedia(encQueryParam, aesKeyBase64, CDN_BASE_URL, fullUrl),
           });
         }
       }
@@ -373,7 +368,7 @@ export class ILinkAdapter implements Adapter {
 
     const contextToken = await getContextToken(state, accountId, userId);
     const opts = {
-      baseUrl: this.config.baseUrl,
+      baseUrl: DEFAULT_BASE_URL,
       token: await this.getAccountToken(accountId),
       contextToken,
     };
@@ -398,16 +393,16 @@ export class ILinkAdapter implements Adapter {
       let mediaItem: import("./api/types.js").MessageItem;
       switch (att.type) {
         case "image":
-          mediaItem = await uploadImageToItem({ buf, toUserId: userId, opts: mediaOpts, cdnBaseUrl: this.config.cdnBaseUrl });
+          mediaItem = await uploadImageToItem({ buf, toUserId: userId, opts: mediaOpts, cdnBaseUrl: CDN_BASE_URL });
           break;
         case "audio":
-          mediaItem = await uploadVoiceToItem({ buf, toUserId: userId, opts: mediaOpts, cdnBaseUrl: this.config.cdnBaseUrl });
+          mediaItem = await uploadVoiceToItem({ buf, toUserId: userId, opts: mediaOpts, cdnBaseUrl: CDN_BASE_URL });
           break;
         case "video":
-          mediaItem = await uploadVideoToItem({ buf, toUserId: userId, opts: mediaOpts, cdnBaseUrl: this.config.cdnBaseUrl });
+          mediaItem = await uploadVideoToItem({ buf, toUserId: userId, opts: mediaOpts, cdnBaseUrl: CDN_BASE_URL });
           break;
         case "file":
-          mediaItem = await uploadFileToItem({ buf, fileName: att.name ?? "file", toUserId: userId, opts: mediaOpts, cdnBaseUrl: this.config.cdnBaseUrl });
+          mediaItem = await uploadFileToItem({ buf, fileName: att.name ?? "file", toUserId: userId, opts: mediaOpts, cdnBaseUrl: CDN_BASE_URL });
           break;
         default:
           throw new Error(`Unsupported attachment type for replyToMessage: ${att.type}`);
@@ -458,7 +453,7 @@ export class ILinkAdapter implements Adapter {
     const text = this.formatConverter.renderPostable(message);
     const contextToken = await getContextToken(state, accountId, userId);
     const opts = {
-      baseUrl: this.config.baseUrl,
+      baseUrl: DEFAULT_BASE_URL,
       token: await this.getAccountToken(accountId),
       contextToken,
     };
@@ -477,19 +472,19 @@ export class ILinkAdapter implements Adapter {
 
       switch (att.type) {
         case "image": {
-          await sendImageMessage({ buf, to: userId, opts: mediaOpts, cdnBaseUrl: this.config.cdnBaseUrl });
+          await sendImageMessage({ buf, to: userId, opts: mediaOpts, cdnBaseUrl: CDN_BASE_URL });
           break;
         }
         case "audio": {
-          await sendVoiceMessage({ buf, to: userId, opts: mediaOpts, cdnBaseUrl: this.config.cdnBaseUrl });
+          await sendVoiceMessage({ buf, to: userId, opts: mediaOpts, cdnBaseUrl: CDN_BASE_URL });
           break;
         }
         case "video": {
-          await sendVideoMessage({ buf, to: userId, opts: mediaOpts, cdnBaseUrl: this.config.cdnBaseUrl });
+          await sendVideoMessage({ buf, to: userId, opts: mediaOpts, cdnBaseUrl: CDN_BASE_URL });
           break;
         }
         case "file": {
-          await sendFileMessage({ buf, fileName: att.name ?? "file", to: userId, opts: mediaOpts, cdnBaseUrl: this.config.cdnBaseUrl });
+          await sendFileMessage({ buf, fileName: att.name ?? "file", to: userId, opts: mediaOpts, cdnBaseUrl: CDN_BASE_URL });
           break;
         }
       }
@@ -502,7 +497,7 @@ export class ILinkAdapter implements Adapter {
       const file = files[0];
       const buf = Buffer.isBuffer(file.data) ? file.data : Buffer.from(await new Blob([file.data]).arrayBuffer());
       const mediaOpts = { ...opts, token: token ?? "" };
-      await sendFileMessage({ buf, fileName: file.filename, to: userId, opts: mediaOpts, cdnBaseUrl: this.config.cdnBaseUrl });
+      await sendFileMessage({ buf, fileName: file.filename, to: userId, opts: mediaOpts, cdnBaseUrl: CDN_BASE_URL });
       return { id: `${Date.now()}`, threadId, raw: { from_user_id: "", to_user_id: userId, item_list: [] } };
     }
 
@@ -590,12 +585,12 @@ export class ILinkAdapter implements Adapter {
 
     const abortController = new AbortController();
     const promise = monitorWeixinProvider({
-      baseUrl: creds.baseUrl || this.config.baseUrl,
+      baseUrl: creds.baseUrl || DEFAULT_BASE_URL,
       token: creds.token,
       accountId,
       state: this.state!,
       abortSignal: this.combineSignals(abortController.signal),
-      longPollTimeoutMs: this.config.longPollTimeoutMs,
+      longPollTimeoutMs: this.longPollTimeoutMs,
       onMessage: (msg) => this.handleInbound(msg, accountId),
       onSessionExpired: (id) => this.handleSessionExpired(id),
       log: (msg) => this.logger.debug(`[${accountId}] ${msg}`),
