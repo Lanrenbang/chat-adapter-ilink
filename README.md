@@ -35,8 +35,6 @@ bot.onNewMention(async (thread, message) => {
 });
 ```
 
-The adapter auto-detects `ILINK_BOT_TOKEN`, `ILINK_BASE_URL`, and `ILINK_CDN_BASE_URL` from environment variables when configured.
-
 ## Authentication
 
 iLink is an open protocol from WeChat individual-account bot system, originally open-sourced through the [OpenClaw](https://github.com/Tencent/openclaw-weixin) plugin. It uses QR-code authentication — there is no API key or token to paste. You **must provide a QR-code display mechanism** in your application (CLI, web UI, or any other frontend).
@@ -196,24 +194,26 @@ For guidance on using this adapter inside a Cloudflare Agent (Agents SDK) with t
 
 ## Configuration
 
+The adapter does not require any configuration for basic usage. All options are optional unless noted.
+
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `baseUrl` | `string` | `https://ilinkai.weixin.qq.com` | iLink API base URL |
-| `cdnBaseUrl` | `string` | `https://novac2c.cdn.weixin.qq.com/c2c` | CDN base URL for media upload |
-| `longPollTimeoutMs` | `number` | `35000` | Long-poll timeout for `getUpdates` |
-| `botAgent` | `string` | `"OpenClaw"` | Self-declared bot agent string (UA-style) |
-| `routeTag` | `string` | — | Route tag for multi-region routing |
-| `userName` | `string` | `"ilink-bot"` | Bot display name |
-| `logger` | `Logger` | `ConsoleLogger("info")` | Custom logger |
-| `state` | `StateAdapter` | — | State adapter (required for QR sessions + multi-account) |
+| `state` | `StateAdapter` | — | **Required at Chat SDK level** (passed to `Chat` constructor, not adapter). Used for account persistence, QR login sessions, and message cursors. |
+| `userName` | `string` | `"ilink-bot"` | Bot display name (Chat SDK convention for adapter identification). |
+| `botAgent` | `string` | `"OpenClaw"` | Self-declared bot agent identifier (UA-style). Sent to WeChat backend in every API request for observability/log attribution only — not used for auth or routing. |
+| `routeTag` | `string` | — | Route tag sent as `SKRouteTag` header for multi-region routing (only needed in special deployments; feature may be reserved for future use). |
+| `longPollTimeoutMs` | `number` | `35000` | Long-poll timeout for message receiving. |
+| `logger` | `Logger` | `ConsoleLogger("info")` | Custom logger (Chat SDK `Logger` type). The adapter uses `chat.getLogger("ilink")` after initialization. |
 
-## Environment variables
+### iLink protocol version
 
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `ILINK_BOT_TOKEN` | No | Default bot token (set via `addAccount` at runtime instead) |
-| `ILINK_BASE_URL` | No | Override the iLink API base URL |
-| `ILINK_CDN_BASE_URL` | No | Override the CDN base URL |
+This adapter is built against **openclaw-weixin v2.4.3** (iLink protocol). The upstream version and adapter version can be imported at runtime:
+
+```typescript
+import { VERSION, ADAPTER_VERSION } from "@lanrenbang/chat-adapter-ilink";
+// VERSION → "2.4.3" (upstream iLink protocol version)
+// ADAPTER_VERSION → "0.1.5" (adapter package version)
+```
 
 ## Feature support
 
@@ -225,7 +225,7 @@ For guidance on using this adapter inside a Cloudflare Agent (Agents SDK) with t
 | Voice → text transcription | Yes (`adapter.transcribeVoice(buffer)`) |
 | Typing indicators | Yes |
 | Direct messages (1:1 only) | Yes |
-| Custom API endpoint | Yes (configurable `baseUrl`) |
+| Custom API endpoint | No (internal constant) |
 | Fetch thread info | Yes |
 | Reference messages (quoted replies) | Yes (`adapter.replyToMessage()` / `adapter.extractQuotedContent()`) |
 | Edit / delete messages | No (Weixin limitation) |

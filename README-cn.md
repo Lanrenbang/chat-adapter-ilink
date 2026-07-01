@@ -35,8 +35,6 @@ bot.onNewMention(async (thread, message) => {
 });
 ```
 
-配置后，适配器会自动从环境变量读取 `ILINK_BOT_TOKEN`、`ILINK_BASE_URL` 和 `ILINK_CDN_BASE_URL`。
-
 ## 认证
 
 iLink 是微信个人版机器人体系中的开放协议，最初通过 [OpenClaw](https://github.com/Tencent/openclaw-weixin) 插件开源实现。它使用二维码认证——没有 API key 或 token 可以直接粘贴。你**必须在应用中提供二维码展示机制**（CLI、网页 UI 或任意前端）。
@@ -198,22 +196,22 @@ const result = await loginWithVerifyCode();
 
 | 选项 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `baseUrl` | `string` | `https://ilinkai.weixin.qq.com` | iLink API 基础地址 |
-| `cdnBaseUrl` | `string` | `https://novac2c.cdn.weixin.qq.com/c2c` | CDN 媒体上传地址 |
-| `longPollTimeoutMs` | `number` | `35000` | `getUpdates` 长轮询超时（毫秒） |
-| `botAgent` | `string` | `"OpenClaw"` | 自定义 bot agent 标识（类 UA 格式） |
-| `routeTag` | `string` | — | 多区域路由标签 |
-| `userName` | `string` | `"ilink-bot"` | 机器人显示名称 |
-| `logger` | `Logger` | `ConsoleLogger("info")` | 自定义日志记录器 |
-| `state` | `StateAdapter` | — | 状态适配器（扫码会话及多账号管理必需） |
+| `state` | `StateAdapter` | — | **Chat SDK 层级必需**（传给 `Chat` 构造函数，非适配器）。用于账号持久化、QR 登录会话和消息游标。 |
+| `userName` | `string` | `"ilink-bot"` | 机器人显示名称（Chat SDK 适配器标识约定）。 |
+| `botAgent` | `string` | `"OpenClaw"` | 自定义 bot agent 标识（UA 风格）。发送给微信后端仅用于可观测性/日志归因——不用于认证或路由。 |
+| `routeTag` | `string` | — | `SKRouteTag` 多区域路由标签（仅在特殊部署时需要；该功能可能保留供未来使用）。 |
+| `longPollTimeoutMs` | `number` | `35000` | `getUpdates` 长轮询超时（毫秒）。 |
+| `logger` | `Logger` | `ConsoleLogger("info")` | 自定义日志记录器（Chat SDK `Logger` 类型）。适配器初始化后使用 `chat.getLogger("ilink")`。 |
 
-## 环境变量
+### iLink 协议版本
 
-| 变量 | 必需 | 说明 |
-|------|------|------|
-| `ILINK_BOT_TOKEN` | 否 | 默认 bot token（推荐运行时通过 `addAccount` 设置） |
-| `ILINK_BASE_URL` | 否 | 覆盖 iLink API 基础地址 |
-| `ILINK_CDN_BASE_URL` | 否 | 覆盖 CDN 基础地址 |
+本适配器基于 **openclaw-weixin v2.4.3**（iLink 协议）。上游版本和适配器版本可在运行时导入：
+
+```typescript
+import { VERSION, ADAPTER_VERSION } from "@lanrenbang/chat-adapter-ilink";
+// VERSION → "2.4.3"（上游 iLink 协议版本）
+// ADAPTER_VERSION → "0.1.5"（适配器包版本）
+```
 
 ## 功能支持
 
@@ -225,7 +223,7 @@ const result = await loginWithVerifyCode();
 | 语音 → 文本转录 | 是（`adapter.transcribeVoice(buffer)`） |
 | 输入状态指示器 | 是 |
 | 私聊（仅限 1:1） | 是 |
-| 自定义 API 端点 | 是（可配置 `baseUrl`） |
+| 自定义 API 端点 | 否（内部常量） |
 | 获取线程信息 | 是 |
 | 引用消息（引用回复） | 是（`adapter.replyToMessage()` / `adapter.extractQuotedContent()`） |
 | 编辑 / 删除消息 | 否（微信限制） |

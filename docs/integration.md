@@ -14,28 +14,27 @@ Sub-Agents solve this by giving each login session its own:
 
 ## How it works
 
-The key insight: **the Sub-Agent's instance name is just a routing ID**, decoupled from the adapter's internal `sessionKey`. The frontend generates its own random ID (`subId`) and the backend auto-creates the Sub-Agent on first connection via `onBeforeSubAgent`. No HTTP response carries business data — QR code and sessionKey arrive via `setState()` push over WebSocket.
+The key insight: **the Sub-Agent's instance name is just a routing ID**, decoupled from the adapter's internal `sessionKey`. The frontend generates its own random ID (`subId`) and the Sub-Agent auto-creates via `onBeforeSubAgent` or custom routing. No HTTP response carries business data — QR code and sessionKey arrive via `setState()` push over WebSocket.
 
 ```
-Browser                          MainAgent                        LoginSession(subId)
+Browser                         MainAgent                        LoginSession(subId)
   │                                  │                                  │
   │── GET /login ──→                                                 │
   │←── static HTML (no dynamic data)                                  │
   │                                                                   │
-  │── WebSocket /agents/main-agent/default/sub/login-session/{subId} ──→│
-  │                                  │── onBeforeSubAgent ──────────→  │
-  │                                  │   (auto-creates LoginSession)   │
-  │                                  │   [onStart fires on first DO]   │
-  │                                  │←── RPC: parent.startLogin(subId) │
-  │                                  │── schedule(0, "runLogin", …)    │
-  │                                  │←── allow ─────────────────────  │
+  │── WebSocket {basePath}/sub/login-session/{subId} ────────────────→│
+  │                                  │── [DO created, onStart fires]  │
+  │                                  │←── RPC: parent.startLogin({    │
+  │                                  │         subId })               │
+  │                                  │── schedule(0, "runLogin", …)  │
+  │                                                                   │
   │←── WebSocket connected,          │                                  │
   │    state synced                  │                                  │
-  │                                  │                                  │
   │                                  │── [alarm fires] runLogin()      │
-  │                                  │   adapter.login({ onStatusChange })│
-  │                                  │   1st cb: LoginResult            │
-  │                                  │── RPC: onStatusUpdate(result)    │
+  │                                  │   adapter.login({               │
+  │                                  │     onStatusChange })           │
+  │                                  │   1st cb: LoginResult           │
+  │                                  │── RPC: onStatusUpdate(result)   │
   │←── setState(LoginResult) ────────│                                  │
   │   render QR code                 │                                  │
   │                                  │                                  │
@@ -50,53 +49,60 @@ Browser                          MainAgent                        LoginSession(s
 
 - **`subId`** (frontend-generated UUID) is the Sub-Agent's instance name — purely for WebSocket routing. It has no relationship to the adapter's `sessionKey`.
 - **`sessionKey`** (adapter-internal) is opaque to the frontend. It arrives via `setState()` in the `LoginResult` payload.
-- **`onBeforeSubAgent`** auto-creates LoginSession on the fly — no pre-registration or server-side session creation needed. `LoginSession.onStart()` fires once on first creation (not on WebSocket reconnect).
 - **`adapter.login({ onStatusChange })`** handles all polling internally. MainAgent's `schedule(0, "runLogin")` initiates it, and the callback pushes each status transition to LoginSession via RPC.
-- **Terminal cleanup** — on `confirmed`/`binded_redirect`/`expired`, a delayed `deleteSubAgent` removes the LoginSession's SQLite storage, preventing zombie Sub-Agent accumulation over time.
+- **Cleanup** — stale Sub-Agents are cleaned up by a periodic task (24-hour interval), covering all scenarios (completed login, closed page, unexpected interruption).
 - **`setState()` → WebSocket push** — the frontend receives state changes automatically, no polling or manual notification needed.
-- **Custom routing** (optional) — clean URLs like `/login` via a `fetch()` handler with `routeSubAgentRequest`.
+- **Custom routing** — clean URLs via a `fetch()` handler with `routeSubAgentRequest`.
 
 ## Worker entry point
+
+The Worker uses custom routing with a `BASE_PATH` prefix. Sub-Agent requests (WebSocket) and BotAgent requests (HTTP) are dispatched manually:
 
 ```typescript
 // Export ChatSdkStateAgent for createChatSdkState() sub-agent routing
 export { ChatSdkStateAgent } from "agents/chat-sdk";
 
-// MainAgent + LoginSession are discovered via ctx.exports (no DO binding needed for LoginSession)
-export { MainAgent, LoginSession } from "./agents";
+// BotAgent + LoginSession are discovered via ctx.exports (no DO binding needed for LoginSession)
+export { BotAgent, LoginSession } from "./agents";
 
-// Optional: custom HTTP routing for clean login URL
-// import { getAgentByName, routeSubAgentRequest } from "agents";
-//
-// export default {
-//   async fetch(request: Request, env: Env) {
-//     const url = new URL(request.url);
-//
-//     // Serve the login page at a clean URL
-//     if (url.pathname === "/login") {
-//       const agent = await getAgentByName(env.MainAgent, "default");
-//       return agent.fetch(request);
-//     }
-//
-//     // routeSubAgentRequest parses fromPath, calls onBeforeSubAgent internally,
-//     // and forwards the request to the Sub-Agent.
-//     const subMatch = url.pathname.match(/^\/login\/([^/]+)(\/.*)$/);
-//     if (subMatch) {
-//       const [, subId, rest] = subMatch;
-//       const parent = await getAgentByName(env.MainAgent, "default");
-//       return routeSubAgentRequest(request, parent, {
-//         fromPath: `/sub/login-session/${subId}${rest}`,
-//       });
-//     }
-//
-//     return new Response("Not found", { status: 404 });
-//   },
-// };
+import { getAgentByName, routeSubAgentRequest } from "agents";
+
+const BASE_PATH = "bot-agent";
+
+export default {
+  async fetch(request: Request, env: Env) {
+    const url = new URL(request.url);
+    const path = url.pathname;
+
+    // Match paths under /{BASE_PATH}/
+    const basePattern = new RegExp(`^/${BASE_PATH}(/.*)?$`);
+    const baseMatch = path.match(basePattern);
+    if (!baseMatch) {
+      return new Response("Not found", { status: 404 });
+    }
+
+    const rest = baseMatch[1] ?? "";
+
+    // Sub-Agent WebSocket routing: /{BASE_PATH}/sub/login-session/{uuid}
+    if (rest.startsWith("/sub/")) {
+      const parent = await getAgentByName(env.BotAgent, "default");
+      return routeSubAgentRequest(request, parent, { fromPath: rest });
+    }
+
+    // BotAgent HTTP routing: /{BASE_PATH} or /{BASE_PATH}/login
+    if (rest === "" || rest === "/" || rest === "/login") {
+      const agent = getAgentByName(env.BotAgent, "default");
+      return agent.fetch(request);
+    }
+
+    return new Response("Not found", { status: 404 });
+  },
+};
 ```
 
-When using the custom routing approach above, `onBeforeSubAgent` is unnecessary because `routeSubAgentRequest` handles the sub-agent forwarding. If you prefer the simpler `routeAgentRequest` automatic routing instead, uncomment the `onBeforeSubAgent` hook in MainAgent below.
+## BotAgent — login orchestrator
 
-## MainAgent — login orchestrator
+The BotAgent owns the `Chat` instance and manages the login lifecycle. It receives login requests from Sub-Agents and runs them via `schedule(0)` to avoid blocking the caller.
 
 ```typescript
 import { Agent } from "agents";
@@ -104,86 +110,79 @@ import { Chat } from "chat";
 import { createILinkAdapter, type ILinkAdapter, type LoginResult } from "@lanrenbang/chat-adapter-ilink";
 import { createChatSdkState } from "agents/chat-sdk";
 
-export class MainAgent extends Agent<Env> {
+export class BotAgent extends Agent<Env> {
   private chat!: Chat;
   private adapter!: ILinkAdapter;
 
-  onStart() {
+  async onStart() {
     this.chat = new Chat({
       userName: "my-bot",
       adapters: { ilink: createILinkAdapter() },
       state: createChatSdkState(), // ← Sub-Agent backed storage
     });
     this.adapter = this.chat.getAdapter("ilink") as ILinkAdapter;
+
+    // Must manually initialize for non-webhook adapters
+    await this.chat.initialize();
+
+    // Register event handlers
+    this.chat.onNewMention(async (thread, message) => {
+      await thread.subscribe();
+      await thread.post({ text: `收到消息: ${message.text}` });
+    });
+
+    // Daily cleanup: remove stale Sub-Agents older than 24h
+    await this.scheduleEvery(86400, "cleanupStaleSubAgents");
   }
 
   // HTTP entry — returns pure static HTML, no business data embedded
   async onRequest(req: Request): Promise<Response> {
     const url = new URL(req.url);
-    if (url.pathname !== "/login") return new Response("Not found", { status: 404 });
-    return new Response(loginHtml, {
-      headers: { "content-type": "text/html" },
-    });
+    if (url.pathname.endsWith("/login")) {
+      return new Response(loginHtml, {
+        headers: { "content-type": "text/html" },
+      });
+    }
+    return new Response("Not found", { status: 404 });
   }
 
-  // 📌 Only needed when using default routeAgentRequest routing.
-  // With custom routing (routeSubAgentRequest) this hook is skipped—
-  // routeSubAgentRequest handles sub-agent forwarding automatically.
-  //
-  // override async onBeforeSubAgent(
-  //   _request: Request,
-  //   { className, name }: { className: string; name: string },
-  // ) {
-  //   if (className !== "LoginSession") return;
-  //   if (!this.hasSubAgent(LoginSession, name)) {
-  //     await this.subAgent(LoginSession, name);
-  //   }
-  // }
-
-  // Called by LoginSession via parentAgent() RPC on first Sub-Agent creation
-  async startLogin(subId: string) {
-    // Schedule the alarm to keep the DO alive during the full login lifecycle.
-    // Without schedule, a fire-and-forget promise may be suspended by DO hibernation.
-    await this.schedule(0, "runLogin", { subId });
+  /**
+   * Start a login session (called by LoginSession Sub-Agent).
+   *
+   * @param subId - LoginSession instance name
+   * @param verifyCode - Optional pairing code for need_verifycode flow
+   */
+  async startLogin({ subId, verifyCode }: { subId: string; verifyCode?: string }) {
+    await this.schedule(0, "runLogin", { subId, verifyCode });
   }
 
   // Alarm handler — runs the full login lifecycle
-  async runLogin({ subId }: { subId: string }) {
-    // Directly start callback-based polling.
-    // The callback receives a LoginResult on every status transition.
-    // The first callback fires with status="wait", qrcodeUrl, and sessionKey
-    // BEFORE entering the long-poll loop (see loginImpl in login.ts).
-    //
-    // For pairing code (need_verifycode): re-call adapter.login() with the
-    // user-provided verifyCode + current sessionKey. See "Verify code flow"
-    // in README.md for the complete pattern — omitted here for brevity.
+  async runLogin({ subId, verifyCode }: { subId: string; verifyCode?: string }) {
+    const s = await this.subAgent(LoginSession, subId);
+
     await this.adapter.login({
+      sessionKey: s.state.sessionKey,
+      verifyCode,
       onStatusChange: async (result: LoginResult) => {
-        const s = await this.subAgent(LoginSession, subId);
         await s.onStatusUpdate(result);
 
-        // Terminal states: Sub-Agent is no longer needed.
-        // Schedule cleanup with a delay so the client has time to
-        // receive the final setState() push over WebSocket.
-        if (isTerminalLoginStatus(result.status)) {
-          await this.schedule(10, "cleanupLoginSession", { subId });
-        }
+        // On need_verifycode: the frontend calls LoginSession.submitVerifyCode()
+        // which triggers startLogin({ subId, verifyCode }) again.
+        // Terminal states are handled by the 24h cleanup task.
       },
     });
-    // Login complete — adapter auto-registered the account on "confirmed"
   }
 
-  // Delete a LoginSession Sub-Agent after login reaches a terminal state.
-  // Without cleanup, zombie Sub-Agents (named by random UUID) accumulate
-  // SQLite storage indefinitely — they are never reused.
-  async cleanupLoginSession({ subId }: { subId: string }) {
-    this.deleteSubAgent(LoginSession, subId);
+  // Periodic cleanup: delete Sub-Agents older than 24 hours
+  async cleanupStaleSubAgents() {
+    const cutoff = Date.now() - 86_400_000;
+    const sessions = this.listSubAgents(LoginSession);
+    for (const session of sessions) {
+      if (session.createdAt < cutoff) {
+        this.deleteSubAgent(LoginSession, session.name);
+      }
+    }
   }
-}
-
-/** Login statuses after which the Sub-Agent is no longer useful. */
-function isTerminalLoginStatus(status: string): boolean {
-  return status === "confirmed" || status === "binded_redirect" || status === "expired";
 }
 
 const loginHtml = `<!DOCTYPE html>
@@ -197,31 +196,42 @@ const subId = crypto.randomUUID();
 
 ## LoginSession — per-session state container
 
-The Sub-Agent acts as a dedicated state bridge: it receives RPC calls from the parent and pushes state to its WebSocket client. Its state type is the adapter's `LoginResult` — no custom type needed.
+The Sub-Agent acts as a dedicated state bridge: it receives RPC calls from the parent and pushes state to its WebSocket client. It also exposes a `@callable` method for verify code submission.
 
 ```typescript
+import { Agent, callable } from "agents";
 import type { LoginResult } from "@lanrenbang/chat-adapter-ilink";
 
 export class LoginSession extends Agent<Env, Partial<LoginResult>> {
   initialState: Partial<LoginResult> = {};
 
-  // Only fires on first Sub-Agent creation (not on WebSocket reconnect
-  // or DO rebuild after eviction). The sessionKey guard prevents
-  // duplicate login initiation: once the first callback has fired,
-  // sessionKey is set and onStart becomes a no-op.
+  // Only fires on first Sub-Agent creation (not on WebSocket reconnect).
+  // The sessionKey guard prevents duplicate login initiation.
   async onStart() {
     if (!this.state.sessionKey) {
-      const parent = await this.parentAgent<MainAgent>(MainAgent);
-      await parent.startLogin(this.name); // this.name === subId
+      const parent = await this.parentAgent<BotAgent>(BotAgent);
+      await parent.startLogin({ subId: this.name });
     }
   }
 
-  // Called by MainAgent via RPC — push each status transition.
-  // The first call fires before the long-poll starts, immediately
-  // delivering qrcodeUrl and sessionKey for QR rendering.
-  // result is a LoginResult (status, qrcodeUrl, sessionKey, message).
+  // Called by BotAgent via RPC — push each status transition via setState()
   async onStatusUpdate(result: LoginResult) {
     this.setState(result);
+  }
+
+  /**
+   * Submit a pairing/verify code (called by frontend via AgentClient RPC).
+   *
+   * When WeChat detects risk, the login flow enters need_verifycode state.
+   * The frontend captures the code from the phone screen and calls this method.
+   */
+  @callable
+  async submitVerifyCode({ verifyCode }: { verifyCode: string }) {
+    if (!this.state.sessionKey) {
+      throw new Error("No active login session for verify code");
+    }
+    const parent = await this.parentAgent<BotAgent>(BotAgent);
+    await parent.startLogin({ subId: this.name, verifyCode });
   }
 }
 ```
@@ -235,15 +245,11 @@ import { useAgent } from "agents/react";
 import { useState } from "react";
 
 function LoginPage() {
-  // subId is purely for routing — unrelated to adapter's sessionKey
   const [subId] = useState(() => crypto.randomUUID());
   const [state, setState] = useState({});
 
-  // Connect to LoginSession Sub-Agent via sub-routing
-  // The WebSocket URL becomes:
-  //   /agents/main-agent/default/sub/login-session/{subId}
   const agent = useAgent({
-    agent: "MainAgent",
+    agent: "BotAgent",
     name: "default",
     sub: [{ agent: "LoginSession", name: subId }],
     onStateUpdate: setState,
@@ -258,6 +264,19 @@ function LoginPage() {
   if (state.status === "need_verifycode") return <VerifyCodeInput />;
   return <div>Connecting...</div>;
 }
+
+function VerifyCodeInput() {
+  const [code, setCode] = useState("");
+  return (
+    <form onSubmit={(e) => {
+      e.preventDefault();
+      agent.call("submitVerifyCode", { verifyCode: code });
+    }}>
+      <input value={code} onChange={(e) => setCode(e.target.value)} placeholder="Enter code from phone" />
+      <button type="submit">Submit</button>
+    </form>
+  );
+}
 ```
 
 ## Wrangler configuration
@@ -267,19 +286,24 @@ Only the top-level parent needs a DO binding. `LoginSession` is a facet-only chi
 ```jsonc
 {
   "durable_objects": {
-    "bindings": [{ "name": "MainAgent", "class_name": "MainAgent" }]
+    "bindings": [{ "name": "BotAgent", "class_name": "BotAgent" }]
   },
   "migrations": [
-    { "tag": "v1", "new_sqlite_classes": ["MainAgent"] }
+    { "tag": "v1", "new_sqlite_classes": ["BotAgent"] }
   ]
 }
 ```
 
+Note: `ChatSdkStateAgent` (from `agents/chat-sdk`) does not need a wrangler DO binding either — Agents SDK discovers it via the code export automatically.
+
 ## Verify code flow (pairing code)
 
-When WeChat requests a verify code (`need_verifycode`), the user needs to provide it. The callback-based `adapter.login()` resolves on `need_verifycode` (not just confirmed/expired). Your application then:
+When WeChat requires a verify code (`status === "need_verifycode"`):
 
-1. Frontend renders a verify code input
-2. User submits code → calls a MainAgent RPC method
-3. MainAgent calls `adapter.login({ sessionKey, verifyCode })` (single-shot) to submit the code
-4. Resumes callback-based polling with `adapter.login({ sessionKey, onStatusChange })`
+1. The `adapter.login()` callback fires with `{ status: "need_verifycode", message, sessionKey }`
+2. BotAgent's `runLogin` returns — the login loop pauses waiting for user input
+3. Frontend renders a verify code input (see `VerifyCodeInput` component above)
+4. User submits the code → `LoginSession.submitVerifyCode({ verifyCode })` is called
+5. `submitVerifyCode` calls `parent.startLogin({ subId, verifyCode })` → `schedule(0, "runLogin", ...)`
+6. `runLogin` calls `adapter.login({ sessionKey, verifyCode, onStatusChange })` with the session key and verify code
+7. Login resumes from where it left off
