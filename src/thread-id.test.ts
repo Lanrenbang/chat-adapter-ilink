@@ -6,20 +6,16 @@ describe("thread ID encoding", () => {
     const accountId = "bot_abc123";
     const userId = "wx_user_xyz";
     const encoded = encodeThreadId(accountId, userId);
-    expect(encoded).toBe("ilink:bot_abc123:wx_user_xyz");
+    expect(encoded).toBe("ilink:bot_abc123/wx_user_xyz:wx_user_xyz");
     const decoded = decodeThreadId(encoded);
     expect(decoded.accountId).toBe(accountId);
     expect(decoded.userId).toBe(userId);
   });
 
-  it("handles userId with colons", () => {
-    const accountId = "bot1";
-    const userId = "user:id:with:colons";
-    const encoded = encodeThreadId(accountId, userId);
-    // Only the first two colons are delimiters; rest is userId
-    const decoded = decodeThreadId(encoded);
-    expect(decoded.accountId).toBe(accountId);
-    expect(decoded.userId).toBe(userId);
+  it("decodes a 2-segment channel ID", () => {
+    const decoded = decodeThreadId("ilink:bot_abc/wx_user_xyz");
+    expect(decoded.accountId).toBe("bot_abc");
+    expect(decoded.userId).toBe("wx_user_xyz");
   });
 
   it("throws on invalid format (no prefix)", () => {
@@ -30,7 +26,7 @@ describe("thread ID encoding", () => {
     expect(() => decodeThreadId("slack:C123:ts")).toThrow("Invalid thread ID");
   });
 
-  it("throws on invalid format (too few parts)", () => {
+  it("throws on invalid format (no slash separator)", () => {
     expect(() => decodeThreadId("ilink:only")).toThrow("Invalid thread ID");
   });
 

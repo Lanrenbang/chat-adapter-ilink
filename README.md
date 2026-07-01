@@ -244,10 +244,11 @@ import { VERSION, ADAPTER_VERSION } from "@lanrenbang/chat-adapter-ilink";
 ## Thread ID format
 
 ```
-ilink:{accountId}:{userId}
+ilink:{accountId}/{userId}:{userId}
 ```
 
-- `ilink:bot_abc123:wx_user_xyz` — DM thread with user `wx_user_xyz` via account `bot_abc123`
+- `ilink:bot_abc123/wx_user_xyz:wx_user_xyz` — DM thread with user `wx_user_xyz` via account `bot_abc123`
+- `ilink:bot_abc123/wx_user_xyz` — Channel ID (used for `channel.post()` in slash commands)
 
 ## Media upload
 

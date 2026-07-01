@@ -242,10 +242,11 @@ import { VERSION, ADAPTER_VERSION } from "@lanrenbang/chat-adapter-ilink";
 ## 线程 ID 格式
 
 ```
-ilink:{accountId}:{userId}
+ilink:{accountId}/{userId}:{userId}
 ```
 
-- `ilink:bot_abc123:wx_user_xyz` — 通过账号 `bot_abc123` 与用户 `wx_user_xyz` 的私聊线程
+- `ilink:bot_abc123/wx_user_xyz:wx_user_xyz` — 通过账号 `bot_abc123` 与用户 `wx_user_xyz` 的私聊线程
+- `ilink:bot_abc123/wx_user_xyz` — 频道 ID（斜杠命令中用于 `channel.post()`）
 
 ## 斜杠命令
 

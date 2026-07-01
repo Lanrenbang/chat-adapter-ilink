@@ -227,7 +227,7 @@ describe("ILinkAdapter.replyToMessage", () => {
     const adapter = createAdapter();
     const raw = rawMsg({ item_list: [{ type: MessageItemType.TEXT, text_item: { text: "Hi" } }] });
     const msg = parseMsg(adapter, raw);
-    await expect(adapter.replyToMessage("ilink:acct:target", "hello", { quotedMessage: msg }))
+    await expect(adapter.replyToMessage("ilink:acct/target:target", "hello", { quotedMessage: msg }))
       .rejects.toThrow("ILinkAdapter not initialized");
   });
 });

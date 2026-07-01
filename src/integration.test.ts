@@ -47,7 +47,6 @@ describe("iLink adapter integration", () => {
     const raw = createTestMessage();
     const accountId = "bot_abc";
 
-    // Simulate what monitor.ts does: parse + process
     const userId = getMessageUserId(raw);
     const threadId = encodeThreadId(accountId, userId);
     const msg = adapter.parseMessage(raw);
@@ -57,10 +56,6 @@ describe("iLink adapter integration", () => {
     expect(result.message.text).toBe("Hello bot!");
     expect(result.message.author.userId).toBe("wx_user_alice");
   });
-
-  // onNewMessage is not applicable to iLink's DM-only model:
-  // all incoming messages are DMs/mentions and go through onNewMention.
-  // This scenario intentionally omitted.
 
   it("stores context_token in state", async () => {
     const raw = createTestMessage({ context_token: "ctx_abc123" });
@@ -115,12 +110,73 @@ describe("iLink adapter integration", () => {
   });
 
   it("postMessage sends text through the adapter", async () => {
-    // This tests that postMessage doesn't throw for text-only
-    // (it will fail at the fetch stage, but we test the parameter building)
     const threadId = encodeThreadId("bot_abc", "wx_user_alice");
-    // The adapter isn't initialized, so assertInitialized will throw
     await expect(
       adapter.postMessage(threadId, "Hello back!"),
     ).rejects.toThrow("not initialized");
+  });
+
+  describe("slash command routing", () => {
+    it("routes /echo to onSlashCommand handler", async () => {
+      const slashPromise = new Promise<{ command: string; text: string; channelId: string }>((resolve) => {
+        chat.onSlashCommand("/echo", async (event) => {
+          resolve({
+            command: event.command,
+            text: event.text,
+            channelId: event.channel.id,
+          });
+        });
+      });
+
+      const accountId = "bot_abc";
+      const userId = "wx_user_alice";
+      const threadId = encodeThreadId(accountId, userId);
+      const channelId = adapter.channelIdFromThreadId(threadId);
+
+      chat.processSlashCommand(
+        {
+          command: "/echo",
+          text: "hello world",
+          raw: {},
+          channelId,
+          adapter,
+          user: { userId, userName: userId, fullName: userId, isBot: false, isMe: false },
+          triggerId: undefined,
+        },
+        undefined,
+      );
+
+      const result = await slashPromise;
+      expect(result.command).toBe("/echo");
+      expect(result.text).toBe("hello world");
+      expect(result.channelId).toBe(channelId);
+    });
+
+    it("routes unknown commands to catch-all handler", async () => {
+      const slashPromise = new Promise<{ command: string; text: string }>((resolve) => {
+        chat.onSlashCommand(async (event) => {
+          resolve({ command: event.command, text: event.text });
+        });
+      });
+
+      const accountId = "bot_abc";
+      const threadId = encodeThreadId(accountId, "wx_bob");
+
+      chat.processSlashCommand(
+        {
+          command: "/unknown",
+          text: "something",
+          raw: {},
+          channelId: adapter.channelIdFromThreadId(threadId),
+          adapter,
+          user: { userId: "wx_bob", userName: "wx_bob", fullName: "wx_bob", isBot: false, isMe: false },
+          triggerId: undefined,
+        },
+        undefined,
+      );
+
+      const result = await slashPromise;
+      expect(result.command).toBe("/unknown");
+    });
   });
 });

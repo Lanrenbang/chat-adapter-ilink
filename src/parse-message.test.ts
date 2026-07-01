@@ -106,7 +106,7 @@ describe("ILinkAdapter.parseMessage", () => {
     expect(msg.id).toBe("50001");
   });
 
-  it("sets thread ID format ilink:accountId:userId", () => {
+  it("sets thread ID format ilink:accountId/userId:userId", () => {
     const adapter = createAdapter();
     const raw = textMsg();
     const msg = adapter.parseMessage(raw);

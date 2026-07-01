@@ -70,26 +70,39 @@ export function createClientId(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-/** Encode a thread ID from accountId and userId. */
+/**
+ * Encode a thread ID from accountId and userId.
+ *
+ * Format: ilink:{accountId}/{userId}:{userId}
+ *   - Thread ID (3 segments): ilink:bot_abc/user_xyz:user_xyz
+ *   - Channel ID (2 segments): ilink:bot_abc/user_xyz
+ */
 export function encodeThreadId(accountId: string, userId: string): string {
-  return `ilink:${accountId}:${userId}`;
+  return `ilink:${accountId}/${userId}:${userId}`;
 }
 
-/** Decode a thread ID into accountId and userId. */
+/**
+ * Decode a thread ID or channel ID into accountId and userId.
+ *
+ * Handles both formats:
+ *   - Thread ID:  "ilink:bot_abc/user_xyz:user_xyz"
+ *   - Channel ID: "ilink:bot_abc/user_xyz"
+ */
 export function decodeThreadId(threadId: string): { accountId: string; userId: string } {
   const firstColon = threadId.indexOf(":");
   if (firstColon === -1) throw new Error(`Invalid thread ID: ${threadId}`);
   const prefix = threadId.slice(0, firstColon);
   if (prefix !== "ilink") throw new Error(`Invalid thread ID: ${threadId}`);
 
-  const secondColon = threadId.indexOf(":", firstColon + 1);
-  if (secondColon === -1) throw new Error(`Invalid thread ID: ${threadId}`);
+  const afterPrefix = threadId.slice(firstColon + 1);
+  const lastColon = afterPrefix.lastIndexOf(":");
+  const channelPart = lastColon !== -1 ? afterPrefix.slice(0, lastColon) : afterPrefix;
+  const slashIdx = channelPart.indexOf("/");
+  if (slashIdx === -1) throw new Error(`Invalid thread ID: ${threadId}`);
 
-  const accountId = threadId.slice(firstColon + 1, secondColon);
-  if (!accountId) throw new Error(`Invalid thread ID: ${threadId}`);
-
-  const userId = threadId.slice(secondColon + 1);
-  if (!userId) throw new Error(`Invalid thread ID: ${threadId}`);
+  const accountId = channelPart.slice(0, slashIdx);
+  const userId = channelPart.slice(slashIdx + 1);
+  if (!accountId || !userId) throw new Error(`Invalid thread ID: ${threadId}`);
 
   return { accountId, userId };
 }

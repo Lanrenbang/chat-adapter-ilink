@@ -2,7 +2,7 @@
  * ILinkAdapter — Weixin iLink adapter for Chat SDK.
  *
  * Manages multiple iLink accounts, each with its own long-poll monitor loop.
- * Thread encoding: `ilink:{accountId}:{userId}`
+ * Thread encoding: `ilink:{accountId}/{userId}:{userId}`
  */
 import type {
   Adapter,
@@ -449,6 +449,24 @@ export class ILinkAdapter implements Adapter {
   ): Promise<RawMessage> {
     this.assertInitialized();
     const { accountId, userId } = decodeThreadId(threadId);
+    return this.sendToUser(accountId, userId, threadId, message);
+  }
+
+  async postChannelMessage(
+    channelId: string,
+    message: AdapterPostableMessage,
+  ): Promise<RawMessage> {
+    this.assertInitialized();
+    const { accountId, userId } = decodeThreadId(channelId);
+    return this.sendToUser(accountId, userId, channelId, message);
+  }
+
+  private async sendToUser(
+    accountId: string,
+    userId: string,
+    resultThreadId: string,
+    message: AdapterPostableMessage,
+  ): Promise<RawMessage> {
     const state = this.state!;
     const text = this.formatConverter.renderPostable(message);
     const contextToken = await getContextToken(state, accountId, userId);
@@ -488,7 +506,7 @@ export class ILinkAdapter implements Adapter {
           break;
         }
       }
-      return { id: `${Date.now()}`, threadId, raw: { from_user_id: "", to_user_id: userId, item_list: [] } };
+      return { id: `${Date.now()}`, threadId: resultThreadId, raw: { from_user_id: "", to_user_id: userId, item_list: [] } };
     }
 
     // Check for generic file uploads
@@ -498,7 +516,7 @@ export class ILinkAdapter implements Adapter {
       const buf = Buffer.isBuffer(file.data) ? file.data : Buffer.from(await new Blob([file.data]).arrayBuffer());
       const mediaOpts = { ...opts, token: token ?? "" };
       await sendFileMessage({ buf, fileName: file.filename, to: userId, opts: mediaOpts, cdnBaseUrl: CDN_BASE_URL });
-      return { id: `${Date.now()}`, threadId, raw: { from_user_id: "", to_user_id: userId, item_list: [] } };
+      return { id: `${Date.now()}`, threadId: resultThreadId, raw: { from_user_id: "", to_user_id: userId, item_list: [] } };
     }
 
     // Plain text
@@ -506,7 +524,7 @@ export class ILinkAdapter implements Adapter {
 
     return {
       id: `${Date.now()}`,
-      threadId,
+      threadId: resultThreadId,
       raw: { from_user_id: "", to_user_id: userId, item_list: [{ type: MessageItemType.TEXT, text_item: { text } }] },
     };
   }
@@ -566,8 +584,8 @@ export class ILinkAdapter implements Adapter {
   }
 
   channelIdFromThreadId(threadId: string): string {
-    const { accountId } = decodeThreadId(threadId);
-    return `${ADAPTER_NAME}:${accountId}`;
+    const { accountId, userId } = decodeThreadId(threadId);
+    return `${ADAPTER_NAME}:${accountId}/${userId}`;
   }
 
   encodeThreadId(platformData: string): string {
@@ -602,14 +620,57 @@ export class ILinkAdapter implements Adapter {
   }
 
   /**
-   * Route an inbound WeixinMessage through processInboundMessage,
-   * which handles context_token storage and dispatches to Chat SDK.
+   * Route an inbound WeixinMessage.
    *
-   * All messages (including slash commands) are routed through
-   * chat.processMessage() — see slash-commands.ts for the design rationale.
+   * Messages starting with "/" are routed to chat.processSlashCommand()
+   * so that bot.onSlashCommand("/cmd", ...) handlers receive them.
+   * All other messages are dispatched via processInboundMessage
+   * (context_token storage + chat.processMessage).
+   *
+   * The slash detection logic follows the upstream openclaw-weixin pattern:
+   *   content.startsWith("/") → extract command name and args
    */
   private async handleInbound(raw: WeixinMessage, accountId: string): Promise<void> {
     if (!this.chat || !this.state) return;
+
+    const text = extractTextBody(raw.item_list);
+    const trimmed = text.trim();
+
+    if (trimmed.startsWith("/")) {
+      const userId = getMessageUserId(raw);
+      if (!userId) return;
+
+      if (raw.context_token) {
+        await setContextToken(this.state, accountId, userId, raw.context_token);
+      }
+
+      const spaceIdx = trimmed.indexOf(" ");
+      const command = spaceIdx === -1 ? trimmed.toLowerCase() : trimmed.slice(0, spaceIdx).toLowerCase();
+      const args = spaceIdx === -1 ? "" : trimmed.slice(spaceIdx + 1);
+
+      const threadId = encodeThreadId(accountId, userId);
+
+      this.chat.processSlashCommand(
+        {
+          command,
+          text: args,
+          raw,
+          channelId: this.channelIdFromThreadId(threadId),
+          adapter: this,
+          user: {
+            userId,
+            userName: userId,
+            fullName: userId,
+            isBot: false,
+            isMe: isBotMessage(raw),
+          },
+          triggerId: undefined,
+        },
+        undefined,
+      );
+      return;
+    }
+
     await processInboundMessage(raw, accountId, this.state, this.chat, this);
   }
 

@@ -1,21 +1,10 @@
 /**
- * Slash command detection helpers.
+ * Slash command detection and text extraction utilities.
  *
- * This module provides ONLY detection utilities — it does NOT handle
- * slash commands. All messages (including those starting with "/")
- * MUST be routed through chat.processMessage() so that the Chat SDK's
- * onSlashCommand handler can process them.
- *
- * Why:
- *   The upstream openclaw-weixin handles /echo and /toggle-debug
- *   internally and returns early, bypassing AI processing. In this
- *   adapter, message routing is the Chat SDK's responsibility.
- *   Users implement slash command logic via:
- *     bot.onSlashCommand("/echo", async (event) => { ... });
- *
- * Reusable from upstream: extractTextBody()
- *   Use this to extract plain text from a WeixinMessage for
- *   slash command detection or any text-based routing.
+ * The slash command detection logic lives in adapter.ts handleInbound() —
+ * it checks if the message text starts with "/" and routes to
+ * chat.processSlashCommand() if so. This module provides the text
+ * extraction utility used by that detection path.
  */
 import { MessageItemType } from "../api/types.js";
 import type { WeixinMessage } from "../api/types.js";
